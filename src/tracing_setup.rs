@@ -1,8 +1,12 @@
+// file: src/tracing_setup.rs
+// description: structured logging configuration and tracing initialization
+// reference: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/
+
 use anyhow::Result;
 use tracing_subscriber::{
-    EnvFilter,
     fmt::{self, format::FmtSpan},
     prelude::*,
+    EnvFilter,
 };
 
 pub fn setup_tracing(log_level: &str, json_logs: bool) -> Result<()> {

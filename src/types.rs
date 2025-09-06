@@ -1,3 +1,7 @@
+// file: src/types.rs
+// description: type definitions and data structures for Hyperliquid WebSocket api messages
+// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/ws-general
+
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +19,7 @@ pub struct Subscription {
     pub coin: String,
 }
 
-// Response types - Updated to handle all Hyperliquid message types
+// Response types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WebSocketMessage {
@@ -27,7 +31,6 @@ pub enum WebSocketMessage {
     CandleData(CandleDataMessage),
     UserEvent(UserEventMessage),
     Notification(NotificationMessage),
-    // Handle direct arrays for different data types
     DirectTrades(Vec<Trade>),
     DirectCandles(Vec<Candle>),
 }

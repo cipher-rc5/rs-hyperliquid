@@ -1,6 +1,10 @@
+// file: src/monitoring.rs
+// description: prometheus metrics collection and health monitoring for production observability
+// reference: https://docs.rs/metrics-exporter-prometheus/latest/metrics_exporter_prometheus/
+
 use crate::error::HyperliquidError;
 use anyhow::Result;
-use metrics::{Counter, Gauge, counter, gauge};
+use metrics::{counter, gauge, Counter, Gauge};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{net::SocketAddr, sync::LazyLock};
 use tracing::{error, info};

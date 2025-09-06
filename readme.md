@@ -209,6 +209,12 @@ cargo test
 cargo run -- --coin BTC --log-level debug
 ```
 
+## LLM Readiness
+
+```bash
+repomix --style markdown -o _v01-llm.md --verbose --parsable-style --no-file-summary --include src,Cargo.toml
+```
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit issues, feature requests, or pull requests.

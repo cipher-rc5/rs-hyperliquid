@@ -1,3 +1,7 @@
+// file: src/formatter.rs
+// description: Trade data formatting and output display utilities for various formats
+// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
+
 use crate::types::{AllMids, Bbo, Book, Candle, Trade};
 
 // ANSI color codes
@@ -132,7 +136,7 @@ impl TradeFormatter {
                     Colors::BOLD,
                     Colors::GRAY,
                     Colors::RESET,
-                    "COUNT",
+                    "#",
                     Colors::GRAY,
                     Colors::RESET,
                     "SIDE",
@@ -154,7 +158,7 @@ impl TradeFormatter {
             } else {
                 format!(
                     "│ {:<7} │ {:<4} │ {:<11} │ {:<11} │ {:<11} │ {:<19} │",
-                    "COUNT", "SIDE", "PRICE", "SIZE", "VALUE", "TIME"
+                    "#", "SIDE", "PRICE", "SIZE", "VALUE", "TIME"
                 )
             };
             println!("{}", labels);
@@ -176,7 +180,7 @@ impl TradeFormatter {
 
     fn print_csv_header(&self) {
         if !self.quiet {
-            println!("count,side,price,size,value,local_time,unix_timestamp");
+            println!("#,side,price,size,value,local_time,unix_timestamp");
         }
     }
 
@@ -257,7 +261,7 @@ impl TradeFormatter {
         let value = price * size;
 
         let json_obj = serde_json::json!({
-            "count": self.trade_count,
+            "#": self.trade_count,
             "coin": trade.coin,
             "side": side_text,
             "price": price,
@@ -344,11 +348,11 @@ impl TradeFormatter {
 
         let symbol = if self.colored {
             match status {
-                "CONNECTING" => (Colors::BRIGHT_YELLOW, "⚡"),
-                "CONNECTED" => (Colors::BRIGHT_GREEN, "✓"),
-                "LISTENING" => (Colors::BRIGHT_BLUE, "📡"),
-                "ERROR" => (Colors::BRIGHT_RED, "❌"),
-                _ => (Colors::WHITE, "•"),
+                "CONNECTING" => (Colors::BRIGHT_YELLOW, "*"),
+                "CONNECTED" => (Colors::BRIGHT_GREEN, "+"),
+                "LISTENING" => (Colors::BRIGHT_BLUE, "~"),
+                "ERROR" => (Colors::BRIGHT_RED, "!"),
+                _ => (Colors::WHITE, "-"),
             }
         } else {
             (

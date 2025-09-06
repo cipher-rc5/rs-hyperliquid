@@ -2,22 +2,362 @@
 ```
 src/
   cli.rs
+  client_state.rs
   client.rs
   config.rs
   error.rs
+  events.rs
   formatter.rs
   lib.rs
   main.rs
   monitoring.rs
   tracing_setup.rs
   types.rs
+  ui.rs
 Cargo.toml
 ```
 
 # Files
 
+## File: src/client_state.rs
+```rust
+// file: src/client_state.rs
+// description: Separate state management from client logic
+
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::time::Instant;
+
+#[derive(Debug, Clone)]
+pub struct ClientState {
+    pub connection_id: String,
+    pub reconnect_count: u32,
+    pub last_message_time: Option<Instant>,
+    pub trade_count: u64,
+    pub is_connected: bool,
+    pub total_messages_received: u64,
+}
+
+impl Default for ClientState {
+    fn default() -> Self {
+        Self {
+            connection_id: uuid::Uuid::new_v4().to_string(),
+            reconnect_count: 0,
+            last_message_time: None,
+            trade_count: 0,
+            is_connected: false,
+            total_messages_received: 0,
+        }
+    }
+}
+
+impl ClientState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset_connection(&mut self) {
+        self.connection_id = uuid::Uuid::new_v4().to_string();
+        self.last_message_time = Some(Instant::now());
+        self.is_connected = true;
+        self.reconnect_count = 0;
+    }
+
+    pub fn increment_reconnect(&mut self) {
+        self.reconnect_count += 1;
+        self.is_connected = false;
+    }
+
+    pub fn record_message(&mut self) {
+        self.last_message_time = Some(Instant::now());
+        self.total_messages_received += 1;
+    }
+
+    pub fn record_trade(&mut self) {
+        self.trade_count += 1;
+    }
+
+    pub fn disconnect(&mut self) {
+        self.is_connected = false;
+    }
+}
+
+pub type SharedClientState = Arc<Mutex<ClientState>>;
+```
+
+## File: src/events.rs
+```rust
+// file: src/events.rs
+// description: Event system to decouple client logic from UI presentation
+
+use crate::types::Trade;
+use tokio::sync::mpsc;
+
+#[derive(Debug, Clone)]
+pub enum ClientEvent {
+    Starting,
+    Connecting { url: String },
+    Connected { connection_id: String },
+    SubscriptionSent { message: String },
+    SubscriptionConfirmed { sub_type: String, coin: String },
+    TradeReceived(Trade),
+    MessageReceived { raw_message: String },
+    ConnectionFailed(String),
+    Reconnecting { attempt: u32, delay_secs: u64 },
+    HealthCheckFailed { reason: String },
+    Disconnected,
+    Stopping,
+}
+
+pub type EventSender = mpsc::UnboundedSender<ClientEvent>;
+pub type EventReceiver = mpsc::UnboundedReceiver<ClientEvent>;
+
+pub fn create_event_channel() -> (EventSender, EventReceiver) {
+    mpsc::unbounded_channel()
+}
+```
+
+## File: src/ui.rs
+```rust
+// file: src/ui.rs
+// description: ui presentation layer that handles events from the client
+
+use crate::{
+    events::{ClientEvent, EventReceiver},
+    formatter::{Colors, OutputFormat, TradeFormatter},
+};
+use tracing::{debug, info, warn};
+
+pub struct UIController {
+    event_receiver: EventReceiver,
+    trade_formatter: TradeFormatter,
+    quiet_mode: bool,
+    header_printed: bool,
+}
+
+impl UIController {
+    pub fn new(
+        event_receiver: EventReceiver,
+        format: OutputFormat,
+        colored: bool,
+        verbose: bool,
+        quiet: bool,
+        price_only: bool,
+        csv_export: bool,
+    ) -> Self {
+        Self {
+            event_receiver,
+            trade_formatter: TradeFormatter::new(
+                format, colored, verbose, quiet, price_only, csv_export,
+            ),
+            quiet_mode: quiet,
+            header_printed: false, // Initialize as false
+        }
+    }
+
+    pub async fn run(&mut self) {
+        self.print_startup_banner();
+        while let Some(event) = self.event_receiver.recv().await {
+            self.handle_event(event).await;
+        }
+    }
+
+    async fn handle_event(&mut self, event: ClientEvent) {
+        match event {
+            ClientEvent::Starting => {
+                info!("Client starting...");
+            }
+            ClientEvent::Connecting { url } => {
+                self.print_connection_status("CONNECTING", &url);
+            }
+            ClientEvent::Connected { connection_id } => {
+                self.print_connection_status("CONNECTED", &format!("ID: {}", connection_id));
+            }
+            ClientEvent::SubscriptionSent { message } => {
+                self.print_subscription_info(&message);
+            }
+            ClientEvent::SubscriptionConfirmed { sub_type, coin } => {
+                self.print_subscription_confirmed(&sub_type, &coin);
+                // Print the table header here, after connection is fully established
+                if !self.header_printed {
+                    self.trade_formatter.print_header();
+                    self.header_printed = true;
+                }
+            }
+            ClientEvent::TradeReceived(trade) => {
+                // Ensure header is printed before any trades (fallback safety)
+                if !self.header_printed {
+                    self.trade_formatter.print_header();
+                    self.header_printed = true;
+                }
+                self.trade_formatter.print_trade(&trade);
+            }
+            ClientEvent::MessageReceived { raw_message } => {
+                debug!("Received message: {}", raw_message);
+            }
+            ClientEvent::ConnectionFailed(error) => {
+                self.print_error("CONNECTION FAILED", &error);
+            }
+            ClientEvent::Reconnecting {
+                attempt,
+                delay_secs,
+            } => {
+                self.print_reconnect_info(delay_secs, attempt);
+            }
+            ClientEvent::HealthCheckFailed { reason } => {
+                warn!("Health check failed: {}", reason);
+            }
+            ClientEvent::Disconnected => {
+                self.print_connection_status("DISCONNECTED", "Connection closed");
+            }
+            ClientEvent::Stopping => {
+                self.print_connection_status("STOPPING", "Client shutting down");
+            }
+        }
+    }
+
+    fn print_startup_banner(&self) {
+        if self.quiet_mode {
+            return;
+        }
+
+        println!();
+        println!(
+            "{}{}╔══════════════════════════════════════════════════════════════════════════════╗{}",
+            Colors::BOLD,
+            Colors::BRIGHT_CYAN,
+            Colors::RESET
+        );
+        println!(
+            "{}{}║                         HYPERLIQUID WEBSOCKET CLIENT                        ║{}",
+            Colors::BOLD,
+            Colors::BRIGHT_CYAN,
+            Colors::RESET
+        );
+        println!(
+            "{}{}╠══════════════════════════════════════════════════════════════════════════════╣{}",
+            Colors::BOLD,
+            Colors::BRIGHT_CYAN,
+            Colors::RESET
+        );
+        println!(
+            "{}{}║{} Version: {}{:<8}{} │ Type: {}{:<10}{} │ Status: {}INITIALIZING{}{}║{}",
+            Colors::BOLD,
+            Colors::BRIGHT_CYAN,
+            Colors::RESET,
+            Colors::BRIGHT_GREEN,
+            env!("CARGO_PKG_VERSION"),
+            Colors::RESET,
+            Colors::BRIGHT_YELLOW,
+            "TRADES",
+            Colors::RESET,
+            Colors::BRIGHT_MAGENTA,
+            Colors::RESET,
+            Colors::BRIGHT_CYAN,
+            Colors::RESET
+        );
+        println!(
+            "{}{}╚══════════════════════════════════════════════════════════════════════════════╝{}",
+            Colors::BOLD,
+            Colors::BRIGHT_CYAN,
+            Colors::RESET
+        );
+        println!();
+    }
+
+    fn print_connection_status(&self, status: &str, message: &str) {
+        if self.quiet_mode && status != "ERROR" {
+            return;
+        }
+
+        let (color, symbol) = match status {
+            "CONNECTING" => (Colors::BRIGHT_YELLOW, "*"),
+            "CONNECTED" => (Colors::BRIGHT_GREEN, "+"),
+            "LISTENING" => (Colors::BRIGHT_BLUE, "~"),
+            "DISCONNECTED" => (Colors::BRIGHT_RED, "X"),
+            "STOPPING" => (Colors::BRIGHT_MAGENTA, "!"),
+            _ => (Colors::WHITE, "-"),
+        };
+
+        println!(
+            "{}{}[{}]{} {} {}{}{}",
+            Colors::BOLD,
+            color,
+            status,
+            Colors::RESET,
+            symbol,
+            Colors::WHITE,
+            message,
+            Colors::RESET
+        );
+    }
+
+    fn print_subscription_info(&self, message: &str) {
+        if self.quiet_mode {
+            return;
+        }
+
+        println!(
+            "{}{}[SUBSCRIBING]{} > {}{}{}",
+            Colors::BOLD,
+            Colors::BRIGHT_MAGENTA,
+            Colors::RESET,
+            Colors::DIM,
+            message,
+            Colors::RESET
+        );
+    }
+
+    fn print_subscription_confirmed(&self, sub_type: &str, coin: &str) {
+        if self.quiet_mode {
+            return;
+        }
+
+        println!(
+            "{}{}[SUBSCRIPTION OK]{} + {} subscription active for {}{}{}",
+            Colors::BOLD,
+            Colors::BRIGHT_GREEN,
+            Colors::RESET,
+            sub_type,
+            Colors::BRIGHT_YELLOW,
+            coin,
+            Colors::RESET
+        );
+        println!();
+    }
+
+    fn print_error(&self, error_type: &str, message: &str) {
+        println!(
+            "{}{}[{}]{} ! {}{}{}",
+            Colors::BOLD,
+            Colors::BRIGHT_RED,
+            error_type,
+            Colors::RESET,
+            Colors::RED,
+            message,
+            Colors::RESET
+        );
+    }
+
+    fn print_reconnect_info(&self, delay_secs: u64, attempt: u32) {
+        println!(
+            "{}{}[RECONNECTING]{} > Attempt {} in {}s...",
+            Colors::BOLD,
+            Colors::BRIGHT_YELLOW,
+            Colors::RESET,
+            attempt,
+            delay_secs
+        );
+    }
+}
+```
+
 ## File: src/cli.rs
 ```rust
+// file: src/cli.rs
+// description: Command-line interface definitions and argument parsing using clap
+// reference: https://docs.rs/clap/latest/clap/
+
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -99,230 +439,509 @@ pub struct Args {
 
 ## File: src/client.rs
 ```rust
+// file: src/client.rs
+// description: WebSocket client implementation for Hyperliquid exchange data streaming
+// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
+
 use crate::{
+    client_state::SharedClientState,
     config::Config,
     error::HyperliquidError,
-    formatter::{Colors, OutputFormat, TradeFormatter},
-    monitoring::{CONNECTED_GAUGE, MESSAGES_RECEIVED_COUNTER, TRADE_COUNTER},
-    types::{SubscriptionRequest, Trade, TradeDataMessage, WebSocketMessage},
+    events::{ClientEvent, EventSender},
+    types::{
+        AllMids, Bbo, Book, Candle, Notification, SubscriptionRequest, Trade, UserEvent,
+        WebSocketMessage,
+    },
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
-use tokio::time::{Instant, interval, timeout};
+use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, trace, warn};
-use uuid::Uuid;
 
 pub struct HyperliquidWebSocketClient {
-    config: Arc<Config>,
-    _connection_id: String,
-    reconnect_count: u32,
-    last_message_time: Option<Instant>,
-    trade_formatter: TradeFormatter,
-    trade_count: u64,
+    pub config: Arc<Config>,
+    event_sender: EventSender,
+    pub state: SharedClientState,
 }
 
+#[allow(dead_code)]
 impl HyperliquidWebSocketClient {
-    pub fn new(config: Arc<Config>) -> Result<Self> {
-        Ok(Self {
-            trade_formatter: TradeFormatter::new(
-                OutputFormat::Table,
-                true, // colored
-                config.logging.verbose_trades,
-                false, // quiet
-                false, // price_only
-                false, // csv_export
-            ),
+    pub fn new(config: Arc<Config>, event_sender: EventSender, state: SharedClientState) -> Self {
+        Self {
             config,
-            _connection_id: Uuid::new_v4().to_string(),
-            reconnect_count: 0,
-            last_message_time: None,
-            trade_count: 0,
-        })
+            event_sender,
+            state,
+        }
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        self.print_startup_banner();
+        let _ = self.send_event(ClientEvent::Starting).await;
 
         loop {
-            self.print_connection_status("CONNECTING", self.config.websocket.url.as_ref());
-            match self.connect_and_subscribe().await {
+            match self.connect_and_run().await {
                 Ok(_) => {
                     info!("Connection loop exited unexpectedly");
                     break;
                 }
                 Err(e) => {
-                    self.print_error("CONNECTION FAILED", &e.to_string());
-                    self.reconnect_count += 1;
-
-                    if !self.should_reconnect() {
-                        error!(
-                            "Max reconnection attempts reached ({})",
-                            self.config.websocket.max_reconnects
-                        );
-                        return Err(e);
-                    }
-
-                    let delay = std::time::Duration::from_secs(self.reconnect_count as u64 * 5);
-                    self.print_reconnect_info(delay.as_secs(), self.reconnect_count);
-                    tokio::time::sleep(delay).await;
+                    error!("Connection error: {}", e);
+                    self.handle_connection_error(e).await?;
                 }
             }
         }
 
+        let _ = self.send_event(ClientEvent::Stopping).await;
         Ok(())
     }
 
-    async fn connect_and_subscribe(&mut self) -> Result<()> {
-        // Establish WebSocket connection with timeout
-        let ws_stream = match timeout(
-            self.config.websocket.timeout,
-            connect_async(self.config.websocket.url.as_str()),
-        )
-        .await
+    async fn connect_and_run(&mut self) -> Result<()> {
+        // Reset connection state
         {
-            Ok(result) => result.map_err(HyperliquidError::WebSocketError)?,
-            Err(_) => {
-                error!(
-                    "WebSocket connection timed out after {} seconds",
-                    self.config.websocket.timeout.as_secs()
-                );
-                return Err(HyperliquidError::Timeout.into());
-            }
-        };
+            let mut state = self.state.lock().await;
+            state.reset_connection();
+        }
 
-        let (ws_stream, _) = ws_stream;
-        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+        let _ = self
+            .send_event(ClientEvent::Connecting {
+                url: self.config.websocket.url.to_string(),
+            })
+            .await;
 
-        self.print_connection_status("CONNECTED", "WebSocket connection established");
-        CONNECTED_GAUGE.set(1.0);
+        // Establish WebSocket connection
+        let (ws_stream, _) = connect_async(self.config.websocket.url.as_str())
+            .await
+            .map_err(|e| {
+                error!("Failed to connect to WebSocket: {}", e);
+                HyperliquidError::WebSocketError(e)
+            })?;
 
-        // Send subscription request
+        info!(
+            "WebSocket connection established to {}",
+            self.config.websocket.url
+        );
+
+        let _ = self
+            .send_event(ClientEvent::Connected {
+                connection_id: {
+                    let state = self.state.lock().await;
+                    state.connection_id.clone()
+                },
+            })
+            .await;
+
+        // Split the WebSocket stream into sender and receiver
+        let (mut write, mut read) = ws_stream.split();
+
+        // Send subscription message
+        self.send_subscription(&mut write).await?;
+
+        // Handle incoming messages
+        self.handle_message_stream(&mut read).await
+    }
+
+    async fn send_subscription(
+        &self,
+        write: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+    ) -> Result<()> {
         let subscription =
             SubscriptionRequest::new_trades_subscription(&self.config.subscription.coin);
-        let subscription_message = serde_json::to_string(&subscription)?;
+        let message = serde_json::to_string(&subscription).map_err(|e| {
+            error!("Failed to serialize subscription message: {}", e);
+            HyperliquidError::SerdeError(e)
+        })?;
 
-        self.print_subscription_info(&subscription_message);
+        let ws_message = Message::Text(message.clone().into());
 
-        ws_sender
-            .send(Message::Text(subscription_message.into()))
-            .await
-            .map_err(HyperliquidError::WebSocketError)?;
+        write.send(ws_message).await.map_err(|e| {
+            error!("Failed to send subscription message: {}", e);
+            HyperliquidError::WebSocketError(e)
+        })?;
 
-        // Setup health check interval
-        let mut health_check_interval = interval(self.config.health.check_interval);
+        let _ = self
+            .send_event(ClientEvent::SubscriptionSent {
+                message: message.clone(),
+            })
+            .await;
 
-        // Reset connection state
-        self.last_message_time = Some(Instant::now());
-        self.reconnect_count = 0;
+        info!("Sent subscription: {}", message);
+        Ok(())
+    }
 
-        self.print_connection_status("LISTENING", "Waiting for market data...");
-        self.trade_formatter.print_header();
+    async fn handle_message_stream(
+        &mut self,
+        read: &mut futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+    ) -> Result<()> {
+        info!("Starting message handling loop");
 
-        // Main message processing loop
-        loop {
-            tokio::select! {
-                // Handle incoming WebSocket messages
-                message = ws_receiver.next() => {
-                    match message {
-                        Some(Ok(msg)) => {
-                            self.last_message_time = Some(Instant::now());
-                            MESSAGES_RECEIVED_COUNTER.increment(1);
-                            self.handle_message(msg).await?;
-                        }
-                        Some(Err(e)) => {
-                            error!("WebSocket error: {}", e);
-                            CONNECTED_GAUGE.set(0.0);
-                            return Err(HyperliquidError::WebSocketError(e).into());
-                        }
-                        None => {
-                            warn!("WebSocket connection closed by server");
-                            CONNECTED_GAUGE.set(0.0);
-                            return Err(HyperliquidError::ConnectionClosed.into());
-                        }
-                    }
-                }
-
-                // Handle health checks
-                _ = health_check_interval.tick() => {
-                    if let Err(e) = self.perform_health_check().await {
-                        error!("Health check failed: {}", e);
-                        CONNECTED_GAUGE.set(0.0);
+        while let Some(message) = read.next().await {
+            match message {
+                Ok(msg) => {
+                    if let Err(e) = self.handle_message(msg).await {
+                        error!("Error handling message: {}", e);
                         return Err(e);
                     }
                 }
+                Err(e) => {
+                    error!("WebSocket stream error: {}", e);
+                    return Err(HyperliquidError::WebSocketError(e).into());
+                }
             }
         }
+
+        info!("WebSocket stream ended");
+        Ok(())
+    }
+
+    async fn handle_connection_error(&mut self, _error: anyhow::Error) -> Result<()> {
+        {
+            let mut state = self.state.lock().await;
+            state.increment_reconnect();
+        }
+
+        let reconnect_count = {
+            let state = self.state.lock().await;
+            state.reconnect_count
+        };
+
+        if reconnect_count >= self.config.websocket.max_reconnects
+            && self.config.websocket.max_reconnects > 0
+        {
+            error!(
+                "Maximum reconnection attempts ({}) reached",
+                self.config.websocket.max_reconnects
+            );
+            return Err(HyperliquidError::MaxReconnectsExceeded.into());
+        }
+
+        let delay = self.config.websocket.reconnect_delay;
+        warn!(
+            "Reconnecting in {} seconds (attempt {})",
+            delay.as_secs(),
+            reconnect_count
+        );
+
+        let _ = self
+            .send_event(ClientEvent::Reconnecting {
+                attempt: reconnect_count,
+                delay_secs: delay.as_secs(),
+            })
+            .await;
+
+        sleep(delay).await;
+        Ok(())
+    }
+
+    async fn send_event(&self, event: ClientEvent) -> Result<()> {
+        self.event_sender
+            .send(event)
+            .map_err(|e| HyperliquidError::EventSendError(e.to_string()).into())
     }
 
     async fn handle_message(&mut self, message: Message) -> Result<()> {
         match message {
             Message::Text(text) => {
                 trace!("Received text message: {}", text);
+                let _ = self
+                    .send_event(ClientEvent::MessageReceived {
+                        raw_message: text.to_string(),
+                    })
+                    .await;
 
-                // Parse message and handle different types
-                match serde_json::from_str::<WebSocketMessage>(&text) {
-                    Ok(WebSocketMessage::SubscriptionResponse(response)) => {
-                        self.print_subscription_confirmed(
-                            &response.data.subscription.subscription_type,
-                            &response.data.subscription.coin,
-                        );
-                    }
-                    Ok(WebSocketMessage::TradeData(trade_data)) => {
-                        self.handle_trade_data(trade_data).await?;
-                    }
-                    Ok(_) => {
-                        debug!("Received other WebSocket message type (not processing)");
-                    }
-                    Err(_) => {
-                        // Try to parse as direct trade array
-                        if let Ok(trades) = serde_json::from_str::<Vec<Trade>>(&text) {
-                            let trade_data = TradeDataMessage {
-                                channel: "trades".to_string(),
-                                data: trades,
-                            };
-                            self.handle_trade_data(trade_data).await?;
-                        } else if let Ok(json_value) =
-                            serde_json::from_str::<serde_json::Value>(&text)
-                            && let Some(channel) =
-                                json_value.get("channel").and_then(|v| v.as_str())
-                            && channel == "subscriptionResponse"
-                        {
-                            self.print_subscription_confirmed(
-                                "trades",
-                                &self.config.subscription.coin,
-                            );
-                        }
-                    }
+                // Record message in state
+                {
+                    let mut state = self.state.lock().await;
+                    state.record_message();
                 }
+
+                self.process_text_message(&text).await?;
+            }
+            Message::Binary(data) => {
+                debug!("Received binary message of {} bytes", data.len());
+                // Handle binary messages if needed
+                warn!("Binary messages not currently supported");
+            }
+            Message::Ping(_data) => {
+                debug!("Received ping, sending pong");
+                // WebSocket library typically handles this automatically
+            }
+            Message::Pong(_) => {
+                debug!("Received pong");
+                // Pong received, connection is alive
             }
             Message::Close(frame) => {
-                self.print_connection_status("CLOSED", &format!("{:?}", frame));
+                let _ = self.send_event(ClientEvent::Disconnected).await;
+                warn!("Received close frame: {:?}", frame);
                 return Err(HyperliquidError::ConnectionClosed.into());
             }
-            _ => {
-                // Handle other message types silently
+            Message::Frame(_) => {
+                // Raw frames are typically handled by the WebSocket library
+                debug!("Received raw frame");
             }
         }
         Ok(())
     }
 
-    async fn handle_trade_data(&mut self, trade_data: TradeDataMessage) -> Result<()> {
-        for trade in trade_data.data {
-            TRADE_COUNTER.increment(1);
-            self.trade_count += 1;
-
-            // Print trade in clean tabular format
-            self.trade_formatter.print_trade(&trade);
-
-            // Additional trade processing
-            self.process_trade(&trade).await?;
+    async fn process_text_message(&mut self, text: &str) -> Result<()> {
+        // Try to parse as the main WebSocketMessage enum first
+        match serde_json::from_str::<WebSocketMessage>(text) {
+            Ok(ws_message) => {
+                self.handle_websocket_message(ws_message).await?;
+            }
+            Err(primary_error) => {
+                // If primary parsing fails, try fallback parsing strategies
+                if let Ok(fallback_result) = self.try_fallback_parsing(text).await {
+                    if !fallback_result {
+                        warn!(
+                            "Failed to parse message with primary parser: {}. Message: {}",
+                            primary_error,
+                            text.chars().take(100).collect::<String>()
+                        );
+                    }
+                } else {
+                    error!(
+                        "Failed to parse WebSocket message: {}. Message: {}",
+                        primary_error,
+                        text.chars().take(100).collect::<String>()
+                    );
+                    return Err(HyperliquidError::InvalidMessage(format!(
+                        "Failed to parse: {}",
+                        primary_error
+                    ))
+                    .into());
+                }
+            }
         }
         Ok(())
     }
 
-    async fn process_trade(&self, trade: &Trade) -> Result<()> {
+    async fn handle_websocket_message(&mut self, message: WebSocketMessage) -> Result<()> {
+        match message {
+            WebSocketMessage::SubscriptionResponse(response) => {
+                info!("Subscription response received");
+                let _ = self
+                    .send_event(ClientEvent::SubscriptionConfirmed {
+                        sub_type: response.data.subscription.subscription_type.clone(),
+                        coin: response.data.subscription.coin.clone(),
+                    })
+                    .await;
+            }
+
+            WebSocketMessage::TradeData(trade_data) => {
+                debug!("Processing {} trades", trade_data.data.len());
+                self.handle_trade_data(trade_data).await?;
+            }
+
+            WebSocketMessage::BookData(book_data) => {
+                debug!("Processing order book data for {}", book_data.data.coin);
+                self.handle_book_data(book_data.data).await?;
+            }
+
+            WebSocketMessage::BboData(bbo_data) => {
+                debug!("Processing BBO data for {}", bbo_data.data.coin);
+                self.handle_bbo_data(bbo_data.data).await?;
+            }
+
+            WebSocketMessage::AllMidsData(all_mids_data) => {
+                debug!(
+                    "Processing all mids data for {} symbols",
+                    all_mids_data.data.mids.len()
+                );
+                self.handle_all_mids_data(all_mids_data.data).await?;
+            }
+
+            WebSocketMessage::CandleData(candle_data) => {
+                debug!("Processing {} candles", candle_data.data.len());
+                self.handle_candle_data(candle_data.data).await?;
+            }
+
+            WebSocketMessage::UserEvent(user_event) => {
+                debug!("Processing user event");
+                self.handle_user_event(user_event.data).await?;
+            }
+
+            WebSocketMessage::Notification(notification) => {
+                info!(
+                    "Processing notification: {}",
+                    notification.data.notification
+                );
+                self.handle_notification(notification.data).await?;
+            }
+
+            WebSocketMessage::DirectTrades(trades) => {
+                debug!("Processing {} direct trades", trades.len());
+                for trade in trades {
+                    {
+                        let mut state = self.state.lock().await;
+                        state.record_trade();
+                    }
+                    let _ = self.send_event(ClientEvent::TradeReceived(trade)).await;
+                }
+            }
+
+            WebSocketMessage::DirectCandles(candles) => {
+                debug!("Processing {} direct candles", candles.len());
+                self.handle_candle_data(candles).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn try_fallback_parsing(&mut self, text: &str) -> Result<bool> {
+        // Try parsing as direct trade array
+        if let Ok(trades) = serde_json::from_str::<Vec<Trade>>(text) {
+            debug!("Parsed as direct trade array with {} trades", trades.len());
+            for trade in trades {
+                {
+                    let mut state = self.state.lock().await;
+                    state.record_trade();
+                }
+                let _ = self.send_event(ClientEvent::TradeReceived(trade)).await;
+            }
+            return Ok(true);
+        }
+
+        // Try parsing as generic JSON to look for subscription responses
+        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(text)
+            && let Some(channel) = json_value.get("channel").and_then(|v| v.as_str())
+        {
+            match channel {
+                "subscriptionResponse" => {
+                    debug!("Detected subscription response in fallback parsing");
+                    let _ = self
+                        .send_event(ClientEvent::SubscriptionConfirmed {
+                            sub_type: "trades".to_string(),
+                            coin: self.config.subscription.coin.clone(),
+                        })
+                        .await;
+                    return Ok(true);
+                }
+                "trades" => {
+                    debug!("Detected trades channel in fallback parsing");
+                    // Try to extract trades from the data field
+                    if let Some(data) = json_value.get("data")
+                        && let Ok(trades) = serde_json::from_value::<Vec<Trade>>(data.clone())
+                    {
+                        for trade in trades {
+                            {
+                                let mut state = self.state.lock().await;
+                                state.record_trade();
+                            }
+                            let _ = self.send_event(ClientEvent::TradeReceived(trade)).await;
+                        }
+                        return Ok(true);
+                    }
+                }
+                _ => {
+                    debug!(
+                        "Received message for channel '{}' - not processing",
+                        channel
+                    );
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    async fn handle_trade_data(
+        &mut self,
+        trade_data: crate::types::TradeDataMessage,
+    ) -> Result<()> {
+        for trade in trade_data.data {
+            {
+                let mut state = self.state.lock().await;
+                state.record_trade();
+            }
+
+            let _ = self
+                .send_event(ClientEvent::TradeReceived(trade.clone()))
+                .await;
+            self.process_trade_metrics(&trade).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_book_data(&mut self, book: Book) -> Result<()> {
+        trace!(
+            "Order book update for {} with {} bids and {} asks",
+            book.coin,
+            book.levels.0.len(),
+            book.levels.1.len()
+        );
+        Ok(())
+    }
+
+    async fn handle_bbo_data(&mut self, bbo: Bbo) -> Result<()> {
+        trace!("BBO update for {}", bbo.coin);
+        Ok(())
+    }
+
+    async fn handle_all_mids_data(&mut self, all_mids: AllMids) -> Result<()> {
+        trace!("All mids update for {} symbols", all_mids.mids.len());
+        Ok(())
+    }
+
+    async fn handle_candle_data(&mut self, candles: Vec<Candle>) -> Result<()> {
+        for candle in candles {
+            trace!(
+                "Candle data for {} - O: {}, H: {}, L: {}, C: {}",
+                candle.s,
+                candle.o,
+                candle.h,
+                candle.l,
+                candle.c
+            );
+        }
+        Ok(())
+    }
+
+    async fn handle_user_event(&mut self, user_event: UserEvent) -> Result<()> {
+        match user_event {
+            UserEvent::Fills { fills } => {
+                info!("Received {} user fills", fills.len());
+                for fill in fills {
+                    debug!(
+                        "Fill: {} {} @ {} for {}",
+                        fill.side, fill.sz, fill.px, fill.coin
+                    );
+                }
+            }
+            UserEvent::Funding { funding } => {
+                info!(
+                    "Received funding update for {}: {}",
+                    funding.coin, funding.usdc
+                );
+            }
+            UserEvent::Liquidation { liquidation } => {
+                warn!("Liquidation event: ID {}", liquidation.lid);
+            }
+            UserEvent::NonUserCancel { non_user_cancel } => {
+                info!("Non-user cancellation events: {}", non_user_cancel.len());
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_notification(&mut self, notification: Notification) -> Result<()> {
+        info!("System notification: {}", notification.notification);
+        Ok(())
+    }
+
+    async fn process_trade_metrics(&self, trade: &Trade) -> Result<()> {
+        crate::monitoring::TRADE_COUNTER.increment(1);
+
         trace!(
             trade_id = trade.tid,
             coin = %trade.coin,
@@ -330,161 +949,19 @@ impl HyperliquidWebSocketClient {
             price = %trade.px,
             size = %trade.sz,
             hash = %trade.hash,
-            "Processing trade"
+            "Processing trade metrics"
         );
         Ok(())
-    }
-
-    async fn perform_health_check(&self) -> Result<()> {
-        let now = Instant::now();
-
-        if let Some(last_msg_time) = self.last_message_time {
-            let time_since_last_message = now.duration_since(last_msg_time);
-            let max_silence = self.config.health.check_interval * 3;
-
-            if time_since_last_message > max_silence {
-                return Err(HyperliquidError::HealthCheckFailed {
-                    reason: format!(
-                        "No messages received for {} seconds",
-                        time_since_last_message.as_secs()
-                    ),
-                }
-                .into());
-            }
-        }
-
-        debug!("Health check passed");
-        Ok(())
-    }
-
-    fn should_reconnect(&self) -> bool {
-        self.config.websocket.max_reconnects == 0
-            || self.reconnect_count < self.config.websocket.max_reconnects
-    }
-
-    // Clean output formatting methods
-    fn print_startup_banner(&self) {
-        println!();
-        println!(
-            "{}{}╔══════════════════════════════════════════════════════════════════════════════════╗{}",
-            Colors::BOLD,
-            Colors::BRIGHT_CYAN,
-            Colors::RESET
-        );
-        println!(
-            "{}{}║                         HYPERLIQUID WEBSOCKET CLIENT                            ║{}",
-            Colors::BOLD,
-            Colors::BRIGHT_CYAN,
-            Colors::RESET
-        );
-        println!(
-            "{}{}╠══════════════════════════════════════════════════════════════════════════════════╣{}",
-            Colors::BOLD,
-            Colors::BRIGHT_CYAN,
-            Colors::RESET
-        );
-        println!(
-            "{}{}║{} Symbol: {}{:<8}{} │ Type: {}{:<10}{} │ Version: {}{:<8}{}{}║{}",
-            Colors::BOLD,
-            Colors::BRIGHT_CYAN,
-            Colors::RESET,
-            Colors::BRIGHT_WHITE,
-            self.config.subscription.coin,
-            Colors::RESET,
-            Colors::BRIGHT_YELLOW,
-            "TRADES",
-            Colors::RESET,
-            Colors::BRIGHT_GREEN,
-            env!("CARGO_PKG_VERSION"),
-            Colors::RESET,
-            Colors::BRIGHT_CYAN,
-            Colors::RESET
-        );
-        println!(
-            "{}{}╚══════════════════════════════════════════════════════════════════════════════════╝{}",
-            Colors::BOLD,
-            Colors::BRIGHT_CYAN,
-            Colors::RESET
-        );
-        println!();
-    }
-
-    fn print_connection_status(&self, status: &str, message: &str) {
-        let (color, symbol) = match status {
-            "CONNECTING" => (Colors::BRIGHT_YELLOW, "⚡"),
-            "CONNECTED" => (Colors::BRIGHT_GREEN, "✓"),
-            "LISTENING" => (Colors::BRIGHT_BLUE, "👂"),
-            "CLOSED" => (Colors::BRIGHT_RED, "✗"),
-            _ => (Colors::WHITE, "•"),
-        };
-
-        println!(
-            "{}{}[{}]{} {} {}{}{}",
-            Colors::BOLD,
-            color,
-            status,
-            Colors::RESET,
-            symbol,
-            Colors::WHITE,
-            message,
-            Colors::RESET
-        );
-    }
-
-    fn print_subscription_info(&self, message: &str) {
-        println!(
-            "{}{}[SUBSCRIBING]{} 📡 {}{}{}",
-            Colors::BOLD,
-            Colors::BRIGHT_MAGENTA,
-            Colors::RESET,
-            Colors::DIM,
-            message,
-            Colors::RESET
-        );
-    }
-
-    fn print_subscription_confirmed(&self, sub_type: &str, coin: &str) {
-        println!(
-            "{}{}[SUBSCRIPTION OK]{} ✅ {} subscription active for {}{}{}",
-            Colors::BOLD,
-            Colors::BRIGHT_GREEN,
-            Colors::RESET,
-            sub_type,
-            Colors::BRIGHT_YELLOW,
-            coin,
-            Colors::RESET
-        );
-        println!();
-    }
-
-    fn print_error(&self, error_type: &str, message: &str) {
-        println!(
-            "{}{}[{}]{} ❌ {}{}{}",
-            Colors::BOLD,
-            Colors::BRIGHT_RED,
-            error_type,
-            Colors::RESET,
-            Colors::RED,
-            message,
-            Colors::RESET
-        );
-    }
-
-    fn print_reconnect_info(&self, delay_secs: u64, attempt: u32) {
-        println!(
-            "{}{}[RECONNECTING]{} 🔄 Attempt {} in {}s...",
-            Colors::BOLD,
-            Colors::BRIGHT_YELLOW,
-            Colors::RESET,
-            attempt,
-            delay_secs
-        );
     }
 }
 ```
 
 ## File: src/config.rs
 ```rust
+// file: src/config.rs
+// description: Configuration management and CLI argument parsing for WebSocket client settings
+// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
+
 use crate::cli::Args;
 use anyhow::Result;
 use std::time::Duration;
@@ -561,6 +1038,10 @@ impl Config {
 
 ## File: src/error.rs
 ```rust
+// file: src/error.rs
+// description: Custom error types and error handling for WebSocket operations and data processing
+// reference: https://docs.rs/thiserror/latest/thiserror/
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -595,6 +1076,9 @@ pub enum HyperliquidError {
     #[error("Invalid message format: {0}")]
     InvalidMessage(String),
 
+    #[error("Event send error: {0}")]
+    EventSendError(String),
+
     #[error("Metrics server error: {0}")]
     MetricsError(String),
 }
@@ -602,6 +1086,10 @@ pub enum HyperliquidError {
 
 ## File: src/formatter.rs
 ```rust
+// file: src/formatter.rs
+// description: Trade data formatting and output display utilities for various formats
+// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
+
 use crate::types::{AllMids, Bbo, Book, Candle, Trade};
 
 // ANSI color codes
@@ -736,7 +1224,7 @@ impl TradeFormatter {
                     Colors::BOLD,
                     Colors::GRAY,
                     Colors::RESET,
-                    "COUNT",
+                    "#",
                     Colors::GRAY,
                     Colors::RESET,
                     "SIDE",
@@ -758,7 +1246,7 @@ impl TradeFormatter {
             } else {
                 format!(
                     "│ {:<7} │ {:<4} │ {:<11} │ {:<11} │ {:<11} │ {:<19} │",
-                    "COUNT", "SIDE", "PRICE", "SIZE", "VALUE", "TIME"
+                    "#", "SIDE", "PRICE", "SIZE", "VALUE", "TIME"
                 )
             };
             println!("{}", labels);
@@ -780,7 +1268,7 @@ impl TradeFormatter {
 
     fn print_csv_header(&self) {
         if !self.quiet {
-            println!("count,side,price,size,value,local_time,unix_timestamp");
+            println!("#,side,price,size,value,local_time,unix_timestamp");
         }
     }
 
@@ -861,7 +1349,7 @@ impl TradeFormatter {
         let value = price * size;
 
         let json_obj = serde_json::json!({
-            "count": self.trade_count,
+            "#": self.trade_count,
             "coin": trade.coin,
             "side": side_text,
             "price": price,
@@ -948,11 +1436,11 @@ impl TradeFormatter {
 
         let symbol = if self.colored {
             match status {
-                "CONNECTING" => (Colors::BRIGHT_YELLOW, "⚡"),
-                "CONNECTED" => (Colors::BRIGHT_GREEN, "✓"),
-                "LISTENING" => (Colors::BRIGHT_BLUE, "📡"),
-                "ERROR" => (Colors::BRIGHT_RED, "❌"),
-                _ => (Colors::WHITE, "•"),
+                "CONNECTING" => (Colors::BRIGHT_YELLOW, "*"),
+                "CONNECTED" => (Colors::BRIGHT_GREEN, "+"),
+                "LISTENING" => (Colors::BRIGHT_BLUE, "~"),
+                "ERROR" => (Colors::BRIGHT_RED, "!"),
+                _ => (Colors::WHITE, "-"),
             }
         } else {
             (
@@ -1247,40 +1735,48 @@ impl AllMidsFormatter {
 
 ## File: src/lib.rs
 ```rust
+// file: src/lib.rs
+// description: Library root module exports and public API surface for rs-hyperliquid
+// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api
+
 pub mod cli;
 pub mod client;
+pub mod client_state;
 pub mod config;
 pub mod error;
+pub mod events;
 pub mod formatter;
 pub mod monitoring;
 pub mod tracing_setup;
 pub mod types;
+pub mod ui;
 
 pub use error::HyperliquidError;
 ```
 
 ## File: src/main.rs
 ```rust
+// file: src/main.rs
+// description: Application entry point and startup configuration for the Hyperliquid WebSocket client
+// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
+
 use anyhow::Result;
 use clap::Parser;
 use rs_hyperliquid::{
-    cli::Args, client::HyperliquidWebSocketClient, config::Config, monitoring::setup_metrics,
-    tracing_setup::setup_tracing,
+    cli::Args, client::HyperliquidWebSocketClient, client_state::ClientState, config::Config,
+    events::create_event_channel, formatter::OutputFormat, monitoring::setup_metrics,
+    tracing_setup::setup_tracing, ui::UIController,
 };
 use std::sync::Arc;
-
+use tokio::signal;
 use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("Starting Hyperliquid WebSocket Client...");
-
     let args = Args::parse();
-    println!("Args parsed successfully");
 
     // Setup tracing/logging
     setup_tracing(&args.log_level, args.json_logs)?;
-    println!("Tracing setup completed");
 
     info!(
         "Starting Hyperliquid WebSocket Client v{}",
@@ -1288,38 +1784,73 @@ async fn main() -> Result<()> {
     );
 
     // Load configuration
-    println!("Loading configuration...");
     let config = Config::from_args(&args)?;
     let config = Arc::new(config);
-    println!("Configuration loaded successfully");
 
     // Setup metrics server if enabled
     if config.metrics.enabled {
-        println!("Setting up metrics server...");
         setup_metrics(config.metrics.port).await?;
         info!("Metrics server started on port {}", config.metrics.port);
     }
 
-    // Create and start the WebSocket client
-    let mut client = HyperliquidWebSocketClient::new(config.clone())?;
+    // Create event channel for communication between client and UI
+    let (event_sender, event_receiver) = create_event_channel();
 
-    // Start the client
-    info!("Client started. Press Ctrl+C to shutdown...");
-    if let Err(e) = client.run().await {
-        error!("WebSocket client error: {}", e);
-        return Err(e);
+    // Create client state
+    let client_state = Arc::new(tokio::sync::Mutex::new(ClientState::new()));
+
+    // Create UI controller
+    let mut ui_controller = UIController::new(
+        event_receiver,
+        OutputFormat::from(args.format.as_str()),
+        !args.no_color,
+        args.verbose_trades,
+        args.quiet,
+        args.price_only,
+        args.csv_export,
+    );
+
+    // Create WebSocket client
+    let mut client = HyperliquidWebSocketClient::new(config.clone(), event_sender, client_state);
+
+    // Setup graceful shutdown
+    let shutdown_signal = async {
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+        info!("Shutdown signal received");
+    };
+
+    // Run client and UI concurrently
+    tokio::select! {
+        result = client.run() => {
+            if let Err(e) = result {
+                error!("WebSocket client error: {}", e);
+                return Err(e);
+            }
+        }
+        _ = ui_controller.run() => {
+            info!("UI controller stopped");
+        }
+        _ = shutdown_signal => {
+            info!("Graceful shutdown initiated");
+        }
     }
 
-    info!("Client stopped successfully");
+    info!("Application stopped successfully");
     Ok(())
 }
 ```
 
 ## File: src/monitoring.rs
 ```rust
+// file: src/monitoring.rs
+// description: prometheus metrics collection and health monitoring for production observability
+// reference: https://docs.rs/metrics-exporter-prometheus/latest/metrics_exporter_prometheus/
+
 use crate::error::HyperliquidError;
 use anyhow::Result;
-use metrics::{Counter, Gauge, counter, gauge};
+use metrics::{counter, gauge, Counter, Gauge};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{net::SocketAddr, sync::LazyLock};
 use tracing::{error, info};
@@ -1407,11 +1938,15 @@ impl HealthStatus {
 
 ## File: src/tracing_setup.rs
 ```rust
+// file: src/tracing_setup.rs
+// description: structured logging configuration and tracing initialization
+// reference: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/
+
 use anyhow::Result;
 use tracing_subscriber::{
-    EnvFilter,
     fmt::{self, format::FmtSpan},
     prelude::*,
+    EnvFilter,
 };
 
 pub fn setup_tracing(log_level: &str, json_logs: bool) -> Result<()> {
@@ -1452,6 +1987,10 @@ pub fn setup_tracing(log_level: &str, json_logs: bool) -> Result<()> {
 
 ## File: src/types.rs
 ```rust
+// file: src/types.rs
+// description: type definitions and data structures for Hyperliquid WebSocket api messages
+// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/ws-general
+
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -1469,7 +2008,7 @@ pub struct Subscription {
     pub coin: String,
 }
 
-// Response types - Updated to handle all Hyperliquid message types
+// Response types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WebSocketMessage {
@@ -1481,7 +2020,6 @@ pub enum WebSocketMessage {
     CandleData(CandleDataMessage),
     UserEvent(UserEventMessage),
     Notification(NotificationMessage),
-    // Handle direct arrays for different data types
     DirectTrades(Vec<Trade>),
     DirectCandles(Vec<Candle>),
 }
@@ -1695,7 +2233,11 @@ impl Trade {
 
     /// Get formatted side string
     pub fn side_formatted(&self) -> &'static str {
-        if self.is_buy() { "BUY" } else { "SELL" }
+        if self.is_buy() {
+            "BUY"
+        } else {
+            "SELL"
+        }
     }
 
     /// Get buyer and seller addresses
@@ -1841,6 +2383,7 @@ path = "examples/debug_connection.rs"
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "color", "suggestions"] }
+fastrand = "2.3.0"
 futures-util = "0.3"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
@@ -1848,6 +2391,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
+tokio-test = "0.4"
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
