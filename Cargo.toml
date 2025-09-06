@@ -1,0 +1,57 @@
+[package]
+name = "rs-hyperliquid"
+version = "0.1.0"
+authors = ["ℭ𝔦𝔭𝔥𝔢𝔯 <https://github.com/cipher-rc5>"]
+categories = ["command-line-utilities", "api-bindings", "asynchronous"]
+edition = "2024"
+exclude = ["examples/debug_connection"]
+homepage = "https://github.com/cipher-rc5/rs-hyperliquid"
+keywords = ["hyperliquid", "websocket", "trading", "cryptocurrency", "real-time"]
+license = "MIT"
+readme = "readme.md"
+repository = "https://github.com/cipher-rc5/rs-hyperliquid"
+description = "High-performance WebSocket client for Hyperliquid trading data with real-time market data streaming"
+
+[[bin]]
+name = "rs-hyperliquid"
+path = "src/main.rs"
+
+[[example]]
+name = "debug_connection"
+path = "examples/debug_connection.rs"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "color", "suggestions"] }
+futures-util = "0.3"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.17"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.0", features = ["full"] }
+tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2.5"
+uuid = { version = "1.18", features = ["v4"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+overflow-checks = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
