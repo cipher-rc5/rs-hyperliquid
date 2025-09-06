@@ -14,6 +14,7 @@ use crate::{
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -147,8 +148,7 @@ impl HyperliquidWebSocketClient {
             match message {
                 Ok(msg) => {
                     if let Err(e) = self.handle_message(msg).await {
-                        error!("Error handling message: {}", e);
-                        return Err(e);
+                        error!("Error handling message: {}. Continuing...", e);
                     }
                 }
                 Err(e) => {
@@ -170,7 +170,7 @@ impl HyperliquidWebSocketClient {
 
         let reconnect_count = {
             let state = self.state.lock().await;
-            state.reconnect_count
+            state.reconnect_count.load(Ordering::Relaxed)
         };
 
         if reconnect_count >= self.config.websocket.max_reconnects
@@ -223,20 +223,25 @@ impl HyperliquidWebSocketClient {
                     state.record_message();
                 }
 
-                self.process_text_message(&text).await?;
+                match serde_json::from_str::<WebSocketMessage>(&text) {
+                    Ok(ws_message) => {
+                        self.handle_websocket_message(ws_message).await?;
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse message: {}. Raw: {}", e, text);
+                        return Err(HyperliquidError::InvalidMessage(e.to_string()).into());
+                    }
+                }
             }
             Message::Binary(data) => {
                 debug!("Received binary message of {} bytes", data.len());
-                // Handle binary messages if needed
                 warn!("Binary messages not currently supported");
             }
             Message::Ping(_data) => {
                 debug!("Received ping, sending pong");
-                // WebSocket library typically handles this automatically
             }
             Message::Pong(_) => {
                 debug!("Received pong");
-                // Pong received, connection is alive
             }
             Message::Close(frame) => {
                 let _ = self.send_event(ClientEvent::Disconnected).await;
@@ -244,41 +249,7 @@ impl HyperliquidWebSocketClient {
                 return Err(HyperliquidError::ConnectionClosed.into());
             }
             Message::Frame(_) => {
-                // Raw frames are typically handled by the WebSocket library
                 debug!("Received raw frame");
-            }
-        }
-        Ok(())
-    }
-
-    async fn process_text_message(&mut self, text: &str) -> Result<()> {
-        // Try to parse as the main WebSocketMessage enum first
-        match serde_json::from_str::<WebSocketMessage>(text) {
-            Ok(ws_message) => {
-                self.handle_websocket_message(ws_message).await?;
-            }
-            Err(primary_error) => {
-                // If primary parsing fails, try fallback parsing strategies
-                if let Ok(fallback_result) = self.try_fallback_parsing(text).await {
-                    if !fallback_result {
-                        warn!(
-                            "Failed to parse message with primary parser: {}. Message: {}",
-                            primary_error,
-                            text.chars().take(100).collect::<String>()
-                        );
-                    }
-                } else {
-                    error!(
-                        "Failed to parse WebSocket message: {}. Message: {}",
-                        primary_error,
-                        text.chars().take(100).collect::<String>()
-                    );
-                    return Err(HyperliquidError::InvalidMessage(format!(
-                        "Failed to parse: {}",
-                        primary_error
-                    ))
-                    .into());
-                }
             }
         }
         Ok(())
@@ -341,7 +312,7 @@ impl HyperliquidWebSocketClient {
                 debug!("Processing {} direct trades", trades.len());
                 for trade in trades {
                     {
-                        let mut state = self.state.lock().await;
+                        let state = self.state.lock().await;
                         state.record_trade();
                     }
                     let _ = self.send_event(ClientEvent::TradeReceived(trade)).await;
@@ -352,66 +323,11 @@ impl HyperliquidWebSocketClient {
                 debug!("Processing {} direct candles", candles.len());
                 self.handle_candle_data(candles).await?;
             }
+            WebSocketMessage::Ping(ping) => {
+                debug!("Received ping message: {:?}", ping);
+            }
         }
         Ok(())
-    }
-
-    async fn try_fallback_parsing(&mut self, text: &str) -> Result<bool> {
-        // Try parsing as direct trade array
-        if let Ok(trades) = serde_json::from_str::<Vec<Trade>>(text) {
-            debug!("Parsed as direct trade array with {} trades", trades.len());
-            for trade in trades {
-                {
-                    let mut state = self.state.lock().await;
-                    state.record_trade();
-                }
-                let _ = self.send_event(ClientEvent::TradeReceived(trade)).await;
-            }
-            return Ok(true);
-        }
-
-        // Try parsing as generic JSON to look for subscription responses
-        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(text)
-            && let Some(channel) = json_value.get("channel").and_then(|v| v.as_str())
-        {
-            match channel {
-                "subscriptionResponse" => {
-                    debug!("Detected subscription response in fallback parsing");
-                    let _ = self
-                        .send_event(ClientEvent::SubscriptionConfirmed {
-                            sub_type: "trades".to_string(),
-                            coin: self.config.subscription.coin.clone(),
-                        })
-                        .await;
-                    return Ok(true);
-                }
-                "trades" => {
-                    debug!("Detected trades channel in fallback parsing");
-                    // Try to extract trades from the data field
-                    if let Some(data) = json_value.get("data")
-                        && let Ok(trades) = serde_json::from_value::<Vec<Trade>>(data.clone())
-                    {
-                        for trade in trades {
-                            {
-                                let mut state = self.state.lock().await;
-                                state.record_trade();
-                            }
-                            let _ = self.send_event(ClientEvent::TradeReceived(trade)).await;
-                        }
-                        return Ok(true);
-                    }
-                }
-                _ => {
-                    debug!(
-                        "Received message for channel '{}' - not processing",
-                        channel
-                    );
-                    return Ok(true);
-                }
-            }
-        }
-
-        Ok(false)
     }
 
     async fn handle_trade_data(
@@ -420,7 +336,7 @@ impl HyperliquidWebSocketClient {
     ) -> Result<()> {
         for trade in trade_data.data {
             {
-                let mut state = self.state.lock().await;
+                let state = self.state.lock().await;
                 state.record_trade();
             }
 

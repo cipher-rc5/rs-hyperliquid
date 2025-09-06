@@ -201,8 +201,8 @@ impl TradeFormatter {
         let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
         let local_time = trade.datetime_local();
 
-        let price = trade.price().unwrap_or(0.0);
-        let size = trade.size().unwrap_or(0.0);
+        let price = trade.px;
+        let size = trade.sz;
         let value = price * size;
 
         println!(
@@ -236,8 +236,8 @@ impl TradeFormatter {
         let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
         let local_time = trade.datetime_local();
 
-        let price = trade.price().unwrap_or(0.0);
-        let size = trade.size().unwrap_or(0.0);
+        let price = trade.px;
+        let size = trade.sz;
         let value = price * size;
 
         println!(
@@ -256,8 +256,8 @@ impl TradeFormatter {
         let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
         let local_time = trade.datetime_local();
 
-        let price = trade.price().unwrap_or(0.0);
-        let size = trade.size().unwrap_or(0.0);
+        let price = trade.px;
+        let size = trade.sz;
         let value = price * size;
 
         let json_obj = serde_json::json!({
@@ -289,8 +289,8 @@ impl TradeFormatter {
         };
         let reset = if self.colored { Colors::RESET } else { "" };
 
-        let price = trade.price().unwrap_or(0.0);
-        let size = trade.size().unwrap_or(0.0);
+        let price = trade.px;
+        let size = trade.sz;
         let local_time = trade.datetime_local();
 
         println!(
@@ -306,7 +306,7 @@ impl TradeFormatter {
     }
 
     fn print_price_only(&self, trade: &Trade) {
-        let price = trade.price().unwrap_or(0.0);
+        let price = trade.px;
         let side_color = if self.colored {
             if trade.is_buy() {
                 Colors::BRIGHT_GREEN
@@ -325,8 +325,8 @@ impl TradeFormatter {
         let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
         let local_time = trade.datetime_local();
 
-        let price = trade.price().unwrap_or(0.0);
-        let size = trade.size().unwrap_or(0.0);
+        let price = trade.px;
+        let size = trade.sz;
         let value = price * size;
 
         eprintln!(
@@ -430,52 +430,6 @@ impl BookFormatter {
             Colors::BRIGHT_RED,
             Colors::RESET
         ));
-        for ask in book.levels.1.iter().take(10) {
-            if let (Ok(price), Ok(size)) = (ask.px.parse::<f64>(), ask.sz.parse::<f64>()) {
-                output.push_str(&format!(
-                    "  {}{:>12.2}{} | {}{:>10.6}{} | Orders: {}{}{}\n",
-                    Colors::RED,
-                    price,
-                    Colors::RESET,
-                    Colors::BRIGHT_WHITE,
-                    size,
-                    Colors::RESET,
-                    Colors::GRAY,
-                    ask.n,
-                    Colors::RESET
-                ));
-            }
-        }
-
-        output.push_str(&format!(
-            "{}--- SPREAD ---{}\n",
-            Colors::GRAY,
-            Colors::RESET
-        ));
-
-        // Format bids (ascending order)
-        output.push_str(&format!(
-            "{}{}BIDS{}\n",
-            Colors::BOLD,
-            Colors::BRIGHT_GREEN,
-            Colors::RESET
-        ));
-        for bid in book.levels.0.iter().take(10) {
-            if let (Ok(price), Ok(size)) = (bid.px.parse::<f64>(), bid.sz.parse::<f64>()) {
-                output.push_str(&format!(
-                    "  {}{:>12.2}{} | {}{:>10.6}{} | Orders: {}{}{}\n",
-                    Colors::GREEN,
-                    price,
-                    Colors::RESET,
-                    Colors::BRIGHT_WHITE,
-                    size,
-                    Colors::RESET,
-                    Colors::GRAY,
-                    bid.n,
-                    Colors::RESET
-                ));
-            }
-        }
 
         output
     }
@@ -501,40 +455,34 @@ impl BboFormatter {
             bbo.time
         );
 
-        if let Some(ref ask) = bbo.bbo.1
-            && let (Ok(price), Ok(size)) = (ask.px.parse::<f64>(), ask.sz.parse::<f64>())
-        {
+        if let Some(ref ask) = bbo.bbo.1 {
             output.push_str(&format!(
                 "  Ask: {}{:>12.2}{} | Size: {}{:>10.6}{}\n",
                 Colors::RED,
-                price,
+                ask.px,
                 Colors::RESET,
                 Colors::BRIGHT_WHITE,
-                size,
+                ask.sz,
                 Colors::RESET
             ));
         }
 
-        if let Some(ref bid) = bbo.bbo.0
-            && let (Ok(price), Ok(size)) = (bid.px.parse::<f64>(), bid.sz.parse::<f64>())
-        {
+        if let Some(ref bid) = bbo.bbo.0 {
             output.push_str(&format!(
                 "  Bid: {}{:>12.2}{} | Size: {}{:>10.6}{}\n",
                 Colors::GREEN,
-                price,
+                bid.px,
                 Colors::RESET,
                 Colors::BRIGHT_WHITE,
-                size,
+                bid.sz,
                 Colors::RESET
             ));
         }
 
         // Calculate spread if both bid and ask exist
-        if let (Some(bid), Some(ask)) = (&bbo.bbo.0, &bbo.bbo.1)
-            && let (Ok(bid_price), Ok(ask_price)) = (bid.px.parse::<f64>(), ask.px.parse::<f64>())
-        {
-            let spread = ask_price - bid_price;
-            let spread_pct = (spread / ask_price) * 100.0;
+        if let (Some(bid), Some(ask)) = (&bbo.bbo.0, &bbo.bbo.1) {
+            let spread = ask.px - bid.px;
+            let spread_pct = (spread / ask.px) * 100.0;
             output.push_str(&format!(
                 "  Spread: {}{:.2}{} ({}{:.4}%{})\n",
                 Colors::YELLOW,

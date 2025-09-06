@@ -3,7 +3,19 @@
 // reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/ws-general
 
 use chrono::{DateTime, Local, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+// Helper for deserializing strings to f64
+mod string_to_float {
+    use super::*;
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<f64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<f64>().map_err(serde::de::Error::custom)
+    }
+}
 
 // Subscription request types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +45,12 @@ pub enum WebSocketMessage {
     Notification(NotificationMessage),
     DirectTrades(Vec<Trade>),
     DirectCandles(Vec<Candle>),
+    Ping(Channel),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Channel {
+    pub channel: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,8 +113,10 @@ pub struct NotificationMessage {
 pub struct Trade {
     pub coin: String,
     pub side: String,
-    pub px: String,         // price as string
-    pub sz: String,         // size as string
+    #[serde(deserialize_with = "string_to_float::deserialize")]
+    pub px: f64, // price
+    #[serde(deserialize_with = "string_to_float::deserialize")]
+    pub sz: f64, // size
     pub time: i64,          // timestamp in milliseconds
     pub hash: String,       // trade hash
     pub tid: i64,           // trade ID
@@ -119,8 +139,10 @@ pub struct Bbo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Level {
-    pub px: String, // price
-    pub sz: String, // size
+    #[serde(deserialize_with = "string_to_float::deserialize")]
+    pub px: f64, // price
+    #[serde(deserialize_with = "string_to_float::deserialize")]
+    pub sz: f64, // size
     pub n: i32,     // number of orders
 }
 
@@ -207,19 +229,9 @@ pub struct Notification {
 }
 
 impl Trade {
-    /// Get the price as a float
-    pub fn price(&self) -> Result<f64, std::num::ParseFloatError> {
-        self.px.parse()
-    }
-
-    /// Get the size as a float
-    pub fn size(&self) -> Result<f64, std::num::ParseFloatError> {
-        self.sz.parse()
-    }
-
     /// Calculate the trade value (price * size)
-    pub fn value(&self) -> Result<f64, std::num::ParseFloatError> {
-        Ok(self.price()? * self.size()?)
+    pub fn value(&self) -> f64 {
+        self.px * self.sz
     }
 
     /// Get timestamp as UTC DateTime
@@ -364,3 +376,4 @@ impl SubscriptionRequest {
         }
     }
 }
+

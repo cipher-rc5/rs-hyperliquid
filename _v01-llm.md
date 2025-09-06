@@ -24,29 +24,32 @@ Cargo.toml
 // file: src/client_state.rs
 // description: Separate state management from client logic
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    Arc,
+};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClientState {
     pub connection_id: String,
-    pub reconnect_count: u32,
+    pub reconnect_count: AtomicU32,
     pub last_message_time: Option<Instant>,
-    pub trade_count: u64,
+    pub trade_count: AtomicU64,
     pub is_connected: bool,
-    pub total_messages_received: u64,
+    pub total_messages_received: AtomicU64,
 }
 
 impl Default for ClientState {
     fn default() -> Self {
         Self {
             connection_id: uuid::Uuid::new_v4().to_string(),
-            reconnect_count: 0,
+            reconnect_count: AtomicU32::new(0),
             last_message_time: None,
-            trade_count: 0,
+            trade_count: AtomicU64::new(0),
             is_connected: false,
-            total_messages_received: 0,
+            total_messages_received: AtomicU64::new(0),
         }
     }
 }
@@ -60,21 +63,22 @@ impl ClientState {
         self.connection_id = uuid::Uuid::new_v4().to_string();
         self.last_message_time = Some(Instant::now());
         self.is_connected = true;
-        self.reconnect_count = 0;
+        self.reconnect_count.store(0, Ordering::Relaxed);
     }
 
     pub fn increment_reconnect(&mut self) {
-        self.reconnect_count += 1;
+        self.reconnect_count.fetch_add(1, Ordering::Relaxed);
         self.is_connected = false;
     }
 
     pub fn record_message(&mut self) {
         self.last_message_time = Some(Instant::now());
-        self.total_messages_received += 1;
+        self.total_messages_received
+            .fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_trade(&mut self) {
-        self.trade_count += 1;
+    pub fn record_trade(&self) {
+        self.trade_count.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn disconnect(&mut self) {
@@ -455,6 +459,7 @@ use crate::{
 };
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -588,8 +593,7 @@ impl HyperliquidWebSocketClient {
             match message {
                 Ok(msg) => {
                     if let Err(e) = self.handle_message(msg).await {
-                        error!("Error handling message: {}", e);
-                        return Err(e);
+                        error!("Error handling message: {}. Continuing...", e);
                     }
                 }
                 Err(e) => {
@@ -611,7 +615,7 @@ impl HyperliquidWebSocketClient {
 
         let reconnect_count = {
             let state = self.state.lock().await;
-            state.reconnect_count
+            state.reconnect_count.load(Ordering::Relaxed)
         };
 
         if reconnect_count >= self.config.websocket.max_reconnects
@@ -664,20 +668,25 @@ impl HyperliquidWebSocketClient {
                     state.record_message();
                 }
 
-                self.process_text_message(&text).await?;
+                match serde_json::from_str::<WebSocketMessage>(&text) {
+                    Ok(ws_message) => {
+                        self.handle_websocket_message(ws_message).await?;
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse message: {}. Raw: {}", e, text);
+                        return Err(HyperliquidError::InvalidMessage(e.to_string()).into());
+                    }
+                }
             }
             Message::Binary(data) => {
                 debug!("Received binary message of {} bytes", data.len());
-                // Handle binary messages if needed
                 warn!("Binary messages not currently supported");
             }
             Message::Ping(_data) => {
                 debug!("Received ping, sending pong");
-                // WebSocket library typically handles this automatically
             }
             Message::Pong(_) => {
                 debug!("Received pong");
-                // Pong received, connection is alive
             }
             Message::Close(frame) => {
                 let _ = self.send_event(ClientEvent::Disconnected).await;
@@ -685,41 +694,7 @@ impl HyperliquidWebSocketClient {
                 return Err(HyperliquidError::ConnectionClosed.into());
             }
             Message::Frame(_) => {
-                // Raw frames are typically handled by the WebSocket library
                 debug!("Received raw frame");
-            }
-        }
-        Ok(())
-    }
-
-    async fn process_text_message(&mut self, text: &str) -> Result<()> {
-        // Try to parse as the main WebSocketMessage enum first
-        match serde_json::from_str::<WebSocketMessage>(text) {
-            Ok(ws_message) => {
-                self.handle_websocket_message(ws_message).await?;
-            }
-            Err(primary_error) => {
-                // If primary parsing fails, try fallback parsing strategies
-                if let Ok(fallback_result) = self.try_fallback_parsing(text).await {
-                    if !fallback_result {
-                        warn!(
-                            "Failed to parse message with primary parser: {}. Message: {}",
-                            primary_error,
-                            text.chars().take(100).collect::<String>()
-                        );
-                    }
-                } else {
-                    error!(
-                        "Failed to parse WebSocket message: {}. Message: {}",
-                        primary_error,
-                        text.chars().take(100).collect::<String>()
-                    );
-                    return Err(HyperliquidError::InvalidMessage(format!(
-                        "Failed to parse: {}",
-                        primary_error
-                    ))
-                    .into());
-                }
             }
         }
         Ok(())
@@ -782,7 +757,7 @@ impl HyperliquidWebSocketClient {
                 debug!("Processing {} direct trades", trades.len());
                 for trade in trades {
                     {
-                        let mut state = self.state.lock().await;
+                        let state = self.state.lock().await;
                         state.record_trade();
                     }
                     let _ = self.send_event(ClientEvent::TradeReceived(trade)).await;
@@ -793,66 +768,11 @@ impl HyperliquidWebSocketClient {
                 debug!("Processing {} direct candles", candles.len());
                 self.handle_candle_data(candles).await?;
             }
+            WebSocketMessage::Ping(ping) => {
+                debug!("Received ping message: {:?}", ping);
+            }
         }
         Ok(())
-    }
-
-    async fn try_fallback_parsing(&mut self, text: &str) -> Result<bool> {
-        // Try parsing as direct trade array
-        if let Ok(trades) = serde_json::from_str::<Vec<Trade>>(text) {
-            debug!("Parsed as direct trade array with {} trades", trades.len());
-            for trade in trades {
-                {
-                    let mut state = self.state.lock().await;
-                    state.record_trade();
-                }
-                let _ = self.send_event(ClientEvent::TradeReceived(trade)).await;
-            }
-            return Ok(true);
-        }
-
-        // Try parsing as generic JSON to look for subscription responses
-        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(text)
-            && let Some(channel) = json_value.get("channel").and_then(|v| v.as_str())
-        {
-            match channel {
-                "subscriptionResponse" => {
-                    debug!("Detected subscription response in fallback parsing");
-                    let _ = self
-                        .send_event(ClientEvent::SubscriptionConfirmed {
-                            sub_type: "trades".to_string(),
-                            coin: self.config.subscription.coin.clone(),
-                        })
-                        .await;
-                    return Ok(true);
-                }
-                "trades" => {
-                    debug!("Detected trades channel in fallback parsing");
-                    // Try to extract trades from the data field
-                    if let Some(data) = json_value.get("data")
-                        && let Ok(trades) = serde_json::from_value::<Vec<Trade>>(data.clone())
-                    {
-                        for trade in trades {
-                            {
-                                let mut state = self.state.lock().await;
-                                state.record_trade();
-                            }
-                            let _ = self.send_event(ClientEvent::TradeReceived(trade)).await;
-                        }
-                        return Ok(true);
-                    }
-                }
-                _ => {
-                    debug!(
-                        "Received message for channel '{}' - not processing",
-                        channel
-                    );
-                    return Ok(true);
-                }
-            }
-        }
-
-        Ok(false)
     }
 
     async fn handle_trade_data(
@@ -861,7 +781,7 @@ impl HyperliquidWebSocketClient {
     ) -> Result<()> {
         for trade in trade_data.data {
             {
-                let mut state = self.state.lock().await;
+                let state = self.state.lock().await;
                 state.record_trade();
             }
 
@@ -1289,8 +1209,8 @@ impl TradeFormatter {
         let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
         let local_time = trade.datetime_local();
 
-        let price = trade.price().unwrap_or(0.0);
-        let size = trade.size().unwrap_or(0.0);
+        let price = trade.px;
+        let size = trade.sz;
         let value = price * size;
 
         println!(
@@ -1324,8 +1244,8 @@ impl TradeFormatter {
         let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
         let local_time = trade.datetime_local();
 
-        let price = trade.price().unwrap_or(0.0);
-        let size = trade.size().unwrap_or(0.0);
+        let price = trade.px;
+        let size = trade.sz;
         let value = price * size;
 
         println!(
@@ -1344,8 +1264,8 @@ impl TradeFormatter {
         let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
         let local_time = trade.datetime_local();
 
-        let price = trade.price().unwrap_or(0.0);
-        let size = trade.size().unwrap_or(0.0);
+        let price = trade.px;
+        let size = trade.sz;
         let value = price * size;
 
         let json_obj = serde_json::json!({
@@ -1377,8 +1297,8 @@ impl TradeFormatter {
         };
         let reset = if self.colored { Colors::RESET } else { "" };
 
-        let price = trade.price().unwrap_or(0.0);
-        let size = trade.size().unwrap_or(0.0);
+        let price = trade.px;
+        let size = trade.sz;
         let local_time = trade.datetime_local();
 
         println!(
@@ -1394,7 +1314,7 @@ impl TradeFormatter {
     }
 
     fn print_price_only(&self, trade: &Trade) {
-        let price = trade.price().unwrap_or(0.0);
+        let price = trade.px;
         let side_color = if self.colored {
             if trade.is_buy() {
                 Colors::BRIGHT_GREEN
@@ -1413,8 +1333,8 @@ impl TradeFormatter {
         let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
         let local_time = trade.datetime_local();
 
-        let price = trade.price().unwrap_or(0.0);
-        let size = trade.size().unwrap_or(0.0);
+        let price = trade.px;
+        let size = trade.sz;
         let value = price * size;
 
         eprintln!(
@@ -1518,52 +1438,6 @@ impl BookFormatter {
             Colors::BRIGHT_RED,
             Colors::RESET
         ));
-        for ask in book.levels.1.iter().take(10) {
-            if let (Ok(price), Ok(size)) = (ask.px.parse::<f64>(), ask.sz.parse::<f64>()) {
-                output.push_str(&format!(
-                    "  {}{:>12.2}{} | {}{:>10.6}{} | Orders: {}{}{}\n",
-                    Colors::RED,
-                    price,
-                    Colors::RESET,
-                    Colors::BRIGHT_WHITE,
-                    size,
-                    Colors::RESET,
-                    Colors::GRAY,
-                    ask.n,
-                    Colors::RESET
-                ));
-            }
-        }
-
-        output.push_str(&format!(
-            "{}--- SPREAD ---{}\n",
-            Colors::GRAY,
-            Colors::RESET
-        ));
-
-        // Format bids (ascending order)
-        output.push_str(&format!(
-            "{}{}BIDS{}\n",
-            Colors::BOLD,
-            Colors::BRIGHT_GREEN,
-            Colors::RESET
-        ));
-        for bid in book.levels.0.iter().take(10) {
-            if let (Ok(price), Ok(size)) = (bid.px.parse::<f64>(), bid.sz.parse::<f64>()) {
-                output.push_str(&format!(
-                    "  {}{:>12.2}{} | {}{:>10.6}{} | Orders: {}{}{}\n",
-                    Colors::GREEN,
-                    price,
-                    Colors::RESET,
-                    Colors::BRIGHT_WHITE,
-                    size,
-                    Colors::RESET,
-                    Colors::GRAY,
-                    bid.n,
-                    Colors::RESET
-                ));
-            }
-        }
 
         output
     }
@@ -1589,40 +1463,34 @@ impl BboFormatter {
             bbo.time
         );
 
-        if let Some(ref ask) = bbo.bbo.1
-            && let (Ok(price), Ok(size)) = (ask.px.parse::<f64>(), ask.sz.parse::<f64>())
-        {
+        if let Some(ref ask) = bbo.bbo.1 {
             output.push_str(&format!(
                 "  Ask: {}{:>12.2}{} | Size: {}{:>10.6}{}\n",
                 Colors::RED,
-                price,
+                ask.px,
                 Colors::RESET,
                 Colors::BRIGHT_WHITE,
-                size,
+                ask.sz,
                 Colors::RESET
             ));
         }
 
-        if let Some(ref bid) = bbo.bbo.0
-            && let (Ok(price), Ok(size)) = (bid.px.parse::<f64>(), bid.sz.parse::<f64>())
-        {
+        if let Some(ref bid) = bbo.bbo.0 {
             output.push_str(&format!(
                 "  Bid: {}{:>12.2}{} | Size: {}{:>10.6}{}\n",
                 Colors::GREEN,
-                price,
+                bid.px,
                 Colors::RESET,
                 Colors::BRIGHT_WHITE,
-                size,
+                bid.sz,
                 Colors::RESET
             ));
         }
 
         // Calculate spread if both bid and ask exist
-        if let (Some(bid), Some(ask)) = (&bbo.bbo.0, &bbo.bbo.1)
-            && let (Ok(bid_price), Ok(ask_price)) = (bid.px.parse::<f64>(), ask.px.parse::<f64>())
-        {
-            let spread = ask_price - bid_price;
-            let spread_pct = (spread / ask_price) * 100.0;
+        if let (Some(bid), Some(ask)) = (&bbo.bbo.0, &bbo.bbo.1) {
+            let spread = ask.px - bid.px;
+            let spread_pct = (spread / ask.px) * 100.0;
             output.push_str(&format!(
                 "  Spread: {}{:.2}{} ({}{:.4}%{})\n",
                 Colors::YELLOW,
@@ -1992,7 +1860,19 @@ pub fn setup_tracing(log_level: &str, json_logs: bool) -> Result<()> {
 // reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/ws-general
 
 use chrono::{DateTime, Local, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+// Helper for deserializing strings to f64
+mod string_to_float {
+    use super::*;
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<f64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<f64>().map_err(serde::de::Error::custom)
+    }
+}
 
 // Subscription request types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2022,6 +1902,12 @@ pub enum WebSocketMessage {
     Notification(NotificationMessage),
     DirectTrades(Vec<Trade>),
     DirectCandles(Vec<Candle>),
+    Ping(Channel),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Channel {
+    pub channel: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2084,8 +1970,10 @@ pub struct NotificationMessage {
 pub struct Trade {
     pub coin: String,
     pub side: String,
-    pub px: String,         // price as string
-    pub sz: String,         // size as string
+    #[serde(deserialize_with = "string_to_float::deserialize")]
+    pub px: f64, // price
+    #[serde(deserialize_with = "string_to_float::deserialize")]
+    pub sz: f64, // size
     pub time: i64,          // timestamp in milliseconds
     pub hash: String,       // trade hash
     pub tid: i64,           // trade ID
@@ -2108,8 +1996,10 @@ pub struct Bbo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Level {
-    pub px: String, // price
-    pub sz: String, // size
+    #[serde(deserialize_with = "string_to_float::deserialize")]
+    pub px: f64, // price
+    #[serde(deserialize_with = "string_to_float::deserialize")]
+    pub sz: f64, // size
     pub n: i32,     // number of orders
 }
 
@@ -2196,19 +2086,9 @@ pub struct Notification {
 }
 
 impl Trade {
-    /// Get the price as a float
-    pub fn price(&self) -> Result<f64, std::num::ParseFloatError> {
-        self.px.parse()
-    }
-
-    /// Get the size as a float
-    pub fn size(&self) -> Result<f64, std::num::ParseFloatError> {
-        self.sz.parse()
-    }
-
     /// Calculate the trade value (price * size)
-    pub fn value(&self) -> Result<f64, std::num::ParseFloatError> {
-        Ok(self.price()? * self.size()?)
+    pub fn value(&self) -> f64 {
+        self.px * self.sz
     }
 
     /// Get timestamp as UTC DateTime
