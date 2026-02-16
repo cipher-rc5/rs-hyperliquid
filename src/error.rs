@@ -7,10 +7,13 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum HyperliquidError {
     #[error("WebSocket connection error: {0}")]
-    WebSocketError(#[from] tokio_tungstenite::tungstenite::Error),
+    WebSocketError(String),
 
     #[error("JSON serialization/deserialization error: {0}")]
     SerdeError(#[from] serde_json::Error),
+
+    #[error("HTTP error: {0}")]
+    HttpError(String),
 
     #[error("URL parsing error: {0}")]
     UrlError(#[from] url::ParseError),

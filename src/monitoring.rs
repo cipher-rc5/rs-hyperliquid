@@ -4,7 +4,7 @@
 
 use crate::error::HyperliquidError;
 use anyhow::Result;
-use metrics::{counter, gauge, Counter, Gauge};
+use metrics::{Counter, Gauge, counter, gauge};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{net::SocketAddr, sync::LazyLock};
 use tracing::{error, info};

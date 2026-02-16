@@ -49,7 +49,7 @@ cargo run -- --coin BTC --quiet --format csv | head -10
 ╚══════════════════════════════════════════════════════════════════════════════════╝
 
 [CONNECTED] ✓ WebSocket connection established
-[SUBSCRIPTION OK] ✅ trades subscription active for BTC
+[SUBSCRIPTION OK]  trades subscription active for BTC
 
 ┌─────────┬──────┬─────────────┬─────────────┬─────────────┬─────────────────────┐
 │ COUNT   │ SIDE │ PRICE       │ SIZE        │ VALUE       │ TIME                │

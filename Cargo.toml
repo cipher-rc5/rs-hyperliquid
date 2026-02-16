@@ -21,23 +21,26 @@ name = "debug_connection"
 path = "examples/debug_connection.rs"
 
 [dependencies]
-anyhow = "1.0"
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4.5", features = ["derive", "color", "suggestions"] }
+anyhow = "1.0.101"
+chrono = { version = "0.4.43", features = ["serde"] }
+clap = { version = "4.5.58", features = ["derive", "color", "suggestions"] }
 fastrand = "2.3.0"
+fastwebsockets = { version = "0.10.0", features = ["upgrade"] }
 futures-util = "0.3"
 metrics = "0.24"
-metrics-exporter-prometheus = "0.17"
+metrics-exporter-prometheus = "0.18.1"
+rustls = { version = "0.23", features = ["ring"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
+tokio-rustls = { version = "0.26", features = ["ring"] }
 tokio-test = "0.4"
-tokio-tungstenite = { version = "0.27", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = "2.5"
 uuid = { version = "1.18", features = ["v4"] }
+webpki-roots = "1.0.6"
 
 [dev-dependencies]
 tokio-test = "0.4"

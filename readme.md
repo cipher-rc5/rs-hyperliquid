@@ -6,7 +6,7 @@
 
 A high-performance, production-ready WebSocket client for streaming real-time trading data from the [Hyperliquid](https://hyperliquid.xyz) exchange. Built with Rust for maximum reliability, minimal latency, and enterprise-grade observability.
 
-## ⚡ Key Features
+##  Key Features
 
 - **Real-Time Data Streaming**: Subscribe to live trades, order books, candles, and market data
 - **Enterprise Reliability**: Automatic reconnection with exponential backoff and comprehensive health monitoring

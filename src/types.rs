@@ -143,7 +143,7 @@ pub struct Level {
     pub px: f64, // price
     #[serde(deserialize_with = "string_to_float::deserialize")]
     pub sz: f64, // size
-    pub n: i32,     // number of orders
+    pub n: i32, // number of orders
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,11 +256,7 @@ impl Trade {
 
     /// Get formatted side string
     pub fn side_formatted(&self) -> &'static str {
-        if self.is_buy() {
-            "BUY"
-        } else {
-            "SELL"
-        }
+        if self.is_buy() { "BUY" } else { "SELL" }
     }
 
     /// Get buyer and seller addresses
@@ -376,4 +372,3 @@ impl SubscriptionRequest {
         }
     }
 }
-

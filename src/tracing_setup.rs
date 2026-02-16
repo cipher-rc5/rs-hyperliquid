@@ -4,9 +4,9 @@
 
 use anyhow::Result;
 use tracing_subscriber::{
+    EnvFilter,
     fmt::{self, format::FmtSpan},
     prelude::*,
-    EnvFilter,
 };
 
 pub fn setup_tracing(log_level: &str, json_logs: bool) -> Result<()> {

@@ -2,8 +2,8 @@
 // description: Separate state management from client logic
 
 use std::sync::{
-    atomic::{AtomicU32, AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -50,8 +50,7 @@ impl ClientState {
 
     pub fn record_message(&mut self) {
         self.last_message_time = Some(Instant::now());
-        self.total_messages_received
-            .fetch_add(1, Ordering::Relaxed);
+        self.total_messages_received.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_trade(&self) {
