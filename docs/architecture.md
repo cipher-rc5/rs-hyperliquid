@@ -20,18 +20,21 @@ The system follows an **Event-Driven Architecture** with clear separation of con
 ## Key Architectural Components
 
 ### 1. **Event System** (`events.rs`)
+
 - **Purpose**: Decouples client logic from UI presentation
 - **Pattern**: Publisher-Subscriber with typed events
 - **Key Types**: `ClientEvent` enum with variants like `TradeReceived`, `Connected`, `Reconnecting`
 - **Implementation**: Uses Tokio's unbounded channels for async communication
 
 ### 2. **State Management** (`client_state.rs`)
+
 - **Purpose**: Thread-safe state sharing between components
 - **Pattern**: Shared mutable state with Arc<Mutex<>>
 - **Responsibilities**: Connection tracking, metrics, reconnection counting
 - **Thread Safety**: Uses atomic operations for counters, mutex for complex state
 
 ### 3. **Client Layer** (`client.rs`)
+
 - **Purpose**: WebSocket connection management and message handling
 - **Pattern**: Actor-like behavior with message processing loop
 - **Key Features**:
@@ -41,6 +44,7 @@ The system follows an **Event-Driven Architecture** with clear separation of con
   - Subscription management
 
 ### 4. **UI Layer** (`ui.rs`)
+
 - **Purpose**: Event-driven presentation logic
 - **Pattern**: Event handler that responds to client events
 - **Responsibilities**:
@@ -49,6 +53,7 @@ The system follows an **Event-Driven Architecture** with clear separation of con
   - Error handling and user feedback
 
 ### 5. **Configuration Management** (`config.rs`)
+
 - **Purpose**: Centralized configuration with validation
 - **Pattern**: Builder pattern from CLI args
 - **Structure**: Nested config structs for different concerns (WebSocket, Metrics, etc.)
@@ -66,6 +71,7 @@ CLI Args → Config → Client + UI Controller
 ```
 
 ### Message Processing Pipeline:
+
 1. **WebSocket Message** → Raw bytes
 2. **Deserialization** → Typed `WebSocketMessage` enum
 3. **Event Generation** → `ClientEvent` variants
@@ -75,21 +81,25 @@ CLI Args → Config → Client + UI Controller
 ## Design Patterns Used
 
 ### 1. **Type-Safe Message Handling**
+
 - Uses Serde with untagged enums for WebSocket message parsing
 - Custom deserializers for string-to-float conversions
 - Comprehensive type definitions matching Hyperliquid's API
 
 ### 2. **Error Handling Strategy**
+
 - Custom error types with `thiserror`
 - Graceful degradation on connection failures
 - Structured error propagation through Result types
 
 ### 3. **Concurrent Architecture**
+
 - **tokio::select!** for graceful shutdown
 - Separate async tasks for client and UI
 - Non-blocking message processing
 
 ### 4. **Plugin Architecture**
+
 - Modular formatters for different output types (Table, CSV, JSON)
 - Optional metrics collection with Prometheus
 - Configurable logging with tracing
@@ -106,12 +116,14 @@ CLI Args → Config → Client + UI Controller
 ## Trade-offs and Considerations
 
 **Pros:**
+
 - Clean, maintainable architecture
 - Good separation of concerns
 - Robust error handling
 - Easy to extend and test
 
 **Cons:**
+
 - Some complexity overhead from the event system
 - Multiple layers of abstraction
 - Could be overkill for simpler use cases

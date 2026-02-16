@@ -1,7 +1,6 @@
-// file: src/lib.rs
-// description: Library root module exports and public API surface for rs-hyperliquid
-// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api
-
+/// file: src/lib.rs
+/// description: Library root module exports and public API surface for rs-hyperliquid
+/// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api
 pub mod cli;
 pub mod client;
 pub mod client_state;

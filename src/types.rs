@@ -1,7 +1,6 @@
-// file: src/types.rs
-// description: type definitions and data structures for Hyperliquid WebSocket api messages
-// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/ws-general
-
+/// file: src/types.rs
+/// description: type definitions and data structures for Hyperliquid WebSocket api messages
+/// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/ws-general
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -256,7 +255,11 @@ impl Trade {
 
     /// Get formatted side string
     pub fn side_formatted(&self) -> &'static str {
-        if self.is_buy() { "BUY" } else { "SELL" }
+        if self.is_buy() {
+            "BUY"
+        } else {
+            "SELL"
+        }
     }
 
     /// Get buyer and seller addresses

@@ -1,7 +1,6 @@
-// file: src/config.rs
-// description: Configuration management and CLI argument parsing for WebSocket client settings
-// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
-
+/// file: src/config.rs
+/// description: Configuration management and CLI argument parsing for WebSocket client settings
+/// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
 use crate::cli::Args;
 use anyhow::Result;
 use std::time::Duration;

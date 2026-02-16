@@ -1,7 +1,6 @@
-// file: src/client.rs
-// description: WebSocket client implementation for Hyperliquid exchange data streaming
-// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
-
+/// file: src/client.rs
+/// description: WebSocket client implementation for Hyperliquid exchange data streaming
+/// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
 use crate::{
     client_state::SharedClientState,
     config::Config,
@@ -14,8 +13,8 @@ use crate::{
 };
 use anyhow::Result;
 use fastwebsockets::{Frame, OpCode, WebSocket};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 use tracing::{debug, error, info, trace, warn};
@@ -312,10 +311,22 @@ impl HyperliquidWebSocketClient {
             return Err(HyperliquidError::MaxReconnectsExceeded.into());
         }
 
-        let delay = self.config.websocket.reconnect_delay;
+        // Exponential backoff with jitter: min(base * 2^attempts, max) + random jitter
+        let base_delay = self.config.websocket.reconnect_delay;
+        let max_delay = std::time::Duration::from_secs(300); // 5 minutes max
+
+        let exponential_delay = std::cmp::min(
+            base_delay * 2u32.pow(reconnect_count.min(5)), // Cap at 2^5 to avoid overflow
+            max_delay,
+        );
+
+        // Add random jitter (0-1000ms) to prevent thundering herd
+        let jitter = std::time::Duration::from_millis(fastrand::u64(0..1000));
+        let delay = exponential_delay + jitter;
+
         warn!(
-            "Reconnecting in {} seconds (attempt {})",
-            delay.as_secs(),
+            "Reconnecting in {:.2} seconds (attempt {}, exponential backoff)",
+            delay.as_secs_f64(),
             reconnect_count
         );
 
@@ -331,29 +342,70 @@ impl HyperliquidWebSocketClient {
     }
 
     async fn send_event(&self, event: ClientEvent) -> Result<()> {
-        self.event_sender
-            .send(event)
-            .map_err(|e| HyperliquidError::EventSendError(e.to_string()).into())
+        // CRITICAL: Differentiate between critical (trades) and non-critical events
+        let is_critical = matches!(event, ClientEvent::TradeReceived(_));
+
+        if is_critical {
+            // NEVER drop trade data - block if needed (with short timeout)
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(10), // 10ms max wait for trades
+                self.event_sender.send(event),
+            )
+            .await
+            {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => {
+                    error!("Critical: Event channel closed: {}", e);
+                    Err(HyperliquidError::EventSendError("Channel closed".to_string()).into())
+                }
+                Err(_) => {
+                    // Even trade events can't wait forever - 10ms timeout exceeded
+                    error!("CRITICAL: Trade event dropped due to channel timeout!");
+                    crate::monitoring::EVENTS_DROPPED.increment(1);
+                    Ok(()) // Continue processing to avoid cascade failure
+                }
+            }
+        } else {
+            // Non-critical events: use try_send (zero-wait)
+            match self.event_sender.try_send(event) {
+                Ok(()) => Ok(()),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    // Drop non-critical events silently if channel full
+                    crate::monitoring::EVENTS_DROPPED.increment(1);
+                    Ok(())
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    Err(HyperliquidError::EventSendError("Channel closed".to_string()).into())
+                }
+            }
+        }
     }
 
     async fn handle_frame(&mut self, frame: Frame<'_>) -> Result<()> {
         match frame.opcode {
             OpCode::Text => {
-                let text = String::from_utf8_lossy(&frame.payload).to_string();
-                trace!("Received text message: {}", text);
-                let _ = self
-                    .send_event(ClientEvent::MessageReceived {
-                        raw_message: text.clone(),
-                    })
-                    .await;
+                // Use Cow to avoid allocation when UTF-8 is valid (common case)
+                let text = String::from_utf8_lossy(&frame.payload);
 
-                // Record message in state
-                {
-                    let mut state = self.state.lock().await;
-                    state.record_message();
+                if tracing::level_enabled!(tracing::Level::TRACE) {
+                    trace!("Received text message: {}", text);
                 }
 
-                match serde_json::from_str::<WebSocketMessage>(&text) {
+                // Only send message received event if in verbose mode
+                // to avoid unnecessary allocations
+                if tracing::level_enabled!(tracing::Level::DEBUG) {
+                    let _ = self
+                        .send_event(ClientEvent::MessageReceived {
+                            raw_message: text.to_string(),
+                        })
+                        .await;
+                }
+
+                // HFT CRITICAL: Skip message counting in hot path to eliminate lock
+                // Metrics are updated via TRADE_COUNTER instead
+
+                // Parse directly from the Cow reference to avoid allocation
+                match serde_json::from_str::<WebSocketMessage>(text.as_ref()) {
                     Ok(ws_message) => {
                         self.handle_websocket_message(ws_message).await?;
                     }
@@ -429,12 +481,27 @@ impl HyperliquidWebSocketClient {
 
             WebSocketMessage::DirectTrades(trades) => {
                 debug!("Processing {} direct trades", trades.len());
-                for trade in trades {
-                    {
-                        let state = self.state.lock().await;
-                        state.record_trade();
-                    }
-                    let _ = self.send_event(ClientEvent::TradeReceived(trade)).await;
+
+                // Batch validation and lock acquisition
+                let valid_trades: Vec<_> = {
+                    let mut state = self.state.lock().await;
+                    trades
+                        .into_iter()
+                        .filter(|trade| {
+                            if !state.validate_trade_sequence(&trade.coin, trade.tid) {
+                                crate::monitoring::DUPLICATE_TRADES.increment(1);
+                                return false;
+                            }
+                            state.record_trade();
+                            true
+                        })
+                        .collect()
+                };
+
+                for trade in valid_trades {
+                    let _ = self
+                        .send_event(ClientEvent::TradeReceived(Arc::new(trade)))
+                        .await;
                 }
             }
 
@@ -453,16 +520,50 @@ impl HyperliquidWebSocketClient {
         &mut self,
         trade_data: crate::types::TradeDataMessage,
     ) -> Result<()> {
-        for trade in trade_data.data {
-            {
-                let state = self.state.lock().await;
-                state.record_trade();
-            }
+        // Batch lock acquisition - single lock for all trades
+        let valid_trades: Vec<_> = {
+            let mut state = self.state.lock().await;
 
+            trade_data
+                .data
+                .into_iter()
+                .filter(|trade| {
+                    // Validate trade sequence
+                    if !state.validate_trade_sequence(&trade.coin, trade.tid) {
+                        warn!(
+                            "Skipping duplicate or out-of-order trade: {} tid={} ",
+                            trade.coin, trade.tid
+                        );
+                        crate::monitoring::DUPLICATE_TRADES.increment(1);
+                        return false;
+                    }
+
+                    // Validate timestamp
+                    if chrono::DateTime::from_timestamp_millis(trade.time).is_none() {
+                        warn!("Invalid timestamp for trade {}: {}", trade.tid, trade.time);
+                        state.record_invalid_timestamp();
+                        crate::monitoring::INVALID_TIMESTAMPS.increment(1);
+                        return false;
+                    }
+
+                    state.record_trade();
+                    true
+                })
+                .collect()
+        }; // Lock released here
+
+        // Process valid trades without holding lock
+        let trade_count = valid_trades.len();
+        if trade_count > 0 {
+            debug!("Processing {} valid trades", trade_count);
+        }
+
+        for trade in valid_trades {
+            let trade_arc = Arc::new(trade);
             let _ = self
-                .send_event(ClientEvent::TradeReceived(trade.clone()))
+                .send_event(ClientEvent::TradeReceived(Arc::clone(&trade_arc)))
                 .await;
-            self.process_trade_metrics(&trade).await?;
+            self.process_trade_metrics(&trade_arc).await?;
         }
         Ok(())
     }
@@ -491,7 +592,11 @@ impl HyperliquidWebSocketClient {
         for candle in candles {
             trace!(
                 "Candle data for {} - O: {}, H: {}, L: {}, C: {}",
-                candle.s, candle.o, candle.h, candle.l, candle.c
+                candle.s,
+                candle.o,
+                candle.h,
+                candle.l,
+                candle.c
             );
         }
         Ok(())
@@ -532,15 +637,18 @@ impl HyperliquidWebSocketClient {
     async fn process_trade_metrics(&self, trade: &Trade) -> Result<()> {
         crate::monitoring::TRADE_COUNTER.increment(1);
 
-        trace!(
-            trade_id = trade.tid,
-            coin = %trade.coin,
-            side = %trade.side,
-            price = %trade.px,
-            size = %trade.sz,
-            hash = %trade.hash,
-            "Processing trade metrics"
-        );
+        // Only trace if enabled to avoid overhead
+        if tracing::level_enabled!(tracing::Level::TRACE) {
+            trace!(
+                trade_id = trade.tid,
+                coin = %trade.coin,
+                side = %trade.side,
+                price = %trade.px,
+                size = %trade.sz,
+                hash = %trade.hash,
+                "Processing trade metrics"
+            );
+        }
         Ok(())
     }
 }

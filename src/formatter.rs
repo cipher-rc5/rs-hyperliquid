@@ -1,7 +1,6 @@
-// file: src/formatter.rs
-// description: Trade data formatting and output display utilities for various formats
-// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
-
+/// file: src/formatter.rs
+/// description: Trade data formatting and output display utilities for various formats
+/// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
 use crate::types::{AllMids, Bbo, Book, Candle, Trade};
 
 // ANSI color codes

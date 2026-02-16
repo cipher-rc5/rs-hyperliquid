@@ -1,7 +1,6 @@
-// file: src/error.rs
-// description: Custom error types and error handling for WebSocket operations and data processing
-// reference: https://docs.rs/thiserror/latest/thiserror/
-
+/// file: src/error.rs
+/// description: Custom error types and error handling for WebSocket operations and data processing
+/// reference: https://docs.rs/thiserror/latest/thiserror/
 use thiserror::Error;
 
 #[derive(Error, Debug)]

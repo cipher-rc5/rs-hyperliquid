@@ -1,6 +1,5 @@
-// file: src/ui.rs
-// description: ui presentation layer that handles events from the client
-
+/// file: src/ui.rs
+/// description: ui presentation layer that handles events from the client
 use crate::{
     events::{ClientEvent, EventReceiver},
     formatter::{Colors, OutputFormat, TradeFormatter},

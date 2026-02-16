@@ -1,10 +1,9 @@
-// file: src/monitoring.rs
-// description: prometheus metrics collection and health monitoring for production observability
-// reference: https://docs.rs/metrics-exporter-prometheus/latest/metrics_exporter_prometheus/
-
+/// file: src/monitoring.rs
+/// description: prometheus metrics collection and health monitoring for production observability
+/// reference: https://docs.rs/metrics-exporter-prometheus/latest/metrics_exporter_prometheus/
 use crate::error::HyperliquidError;
 use anyhow::Result;
-use metrics::{Counter, Gauge, counter, gauge};
+use metrics::{counter, gauge, Counter, Gauge};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{net::SocketAddr, sync::LazyLock};
 use tracing::{error, info};
@@ -17,6 +16,16 @@ pub static TRADE_COUNTER: LazyLock<Counter> =
 pub static RECONNECT_COUNTER: LazyLock<Counter> =
     LazyLock::new(|| counter!("hyperliquid_reconnects_total"));
 pub static CONNECTED_GAUGE: LazyLock<Gauge> = LazyLock::new(|| gauge!("hyperliquid_connected"));
+
+// Data integrity metrics
+pub static DUPLICATE_TRADES: LazyLock<Counter> =
+    LazyLock::new(|| counter!("hyperliquid_duplicate_trades_total"));
+pub static SEQUENCE_GAPS: LazyLock<Counter> =
+    LazyLock::new(|| counter!("hyperliquid_sequence_gaps_total"));
+pub static INVALID_TIMESTAMPS: LazyLock<Counter> =
+    LazyLock::new(|| counter!("hyperliquid_invalid_timestamps_total"));
+pub static EVENTS_DROPPED: LazyLock<Counter> =
+    LazyLock::new(|| counter!("hyperliquid_events_dropped_total"));
 
 pub async fn setup_metrics(port: u16) -> Result<()> {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();

@@ -1,7 +1,6 @@
-// file: src/main.rs
-// description: Application entry point and startup configuration for the Hyperliquid WebSocket client
-// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
-
+/// file: src/main.rs
+/// description: Application entry point and startup configuration for the Hyperliquid WebSocket client
+/// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
 use anyhow::Result;
 use clap::Parser;
 use rs_hyperliquid::{

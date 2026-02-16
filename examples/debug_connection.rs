@@ -17,13 +17,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Perform TLS handshake
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(
-        rustls::ClientConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
-            .with_safe_default_protocol_versions()
-            .expect("Failed to configure TLS protocol versions")
-            .with_root_certificates(rustls::RootCertStore {
-                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-            })
-            .with_no_client_auth(),
+        rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_safe_default_protocol_versions()
+        .expect("Failed to configure TLS protocol versions")
+        .with_root_certificates(rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        })
+        .with_no_client_auth(),
     ));
     let domain =
         rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| format!("{}", e))?;

@@ -1,7 +1,6 @@
-// file: src/cli.rs
-// description: Command-line interface definitions and argument parsing using clap
-// reference: https://docs.rs/clap/latest/clap/
-
+/// file: src/cli.rs
+/// description: Command-line interface definitions and argument parsing using clap
+/// reference: https://docs.rs/clap/latest/clap/
 use clap::Parser;
 
 #[derive(Parser, Debug)]
