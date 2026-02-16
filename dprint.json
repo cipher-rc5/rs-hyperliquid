@@ -92,7 +92,7 @@
     "comment.forceLeadingSpace": true,
     "cargo.applyConventions": true
   },
-  "exec": { "cwd": "${configDir}", "commands": [{ "command": "rustfmt --edition 2021", "exts": ["rs"] }] },
+  "exec": { "cwd": "${configDir}", "commands": [{ "command": "rustfmt --edition 2024", "exts": ["rs"] }] },
   "excludes": ["**/node_modules", "**/*-lock.json"],
   "plugins": [
     "https://plugins.dprint.dev/typescript-0.95.11.wasm",

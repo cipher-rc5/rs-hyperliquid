@@ -2,8 +2,8 @@
 /// description: Separate state management from client logic
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicU32, AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -20,7 +20,6 @@ pub struct ClientState {
     // Trading data integrity tracking
     pub last_trade_ids: HashMap<String, i64>, // coin -> last trade ID
     pub duplicate_trades: AtomicU64,
-    pub sequence_gaps: AtomicU64,
     pub invalid_timestamps: AtomicU64,
     pub last_disconnection_time: Option<Instant>,
 }
@@ -36,7 +35,6 @@ impl Default for ClientState {
             total_messages_received: AtomicU64::new(0),
             last_trade_ids: HashMap::new(),
             duplicate_trades: AtomicU64::new(0),
-            sequence_gaps: AtomicU64::new(0),
             invalid_timestamps: AtomicU64::new(0),
             last_disconnection_time: None,
         }

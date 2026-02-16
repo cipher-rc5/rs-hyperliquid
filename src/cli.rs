@@ -46,10 +46,6 @@ pub struct Args {
     #[arg(long, default_value = "0")]
     pub max_reconnects: u32,
 
-    /// Health check interval in seconds
-    #[arg(long, default_value = "30")]
-    pub health_check_interval: u64,
-
     /// Enable detailed trade logging with buyer/seller info
     #[arg(long)]
     pub verbose_trades: bool,

@@ -4,9 +4,15 @@
 use anyhow::Result;
 use clap::Parser;
 use rs_hyperliquid::{
-    cli::Args, client::HyperliquidWebSocketClient, client_state::ClientState, config::Config,
-    events::create_event_channel, formatter::OutputFormat, monitoring::setup_metrics,
-    tracing_setup::setup_tracing, ui::UIController,
+    cli::Args,
+    client::HyperliquidWebSocketClient,
+    client_state::ClientState,
+    config::Config,
+    events::create_event_channel,
+    formatter::OutputFormat,
+    monitoring::setup_metrics,
+    tracing_setup::setup_tracing,
+    ui::{UIController, UIOptions},
 };
 use std::sync::Arc;
 use tokio::signal;
@@ -44,11 +50,14 @@ async fn main() -> Result<()> {
     let mut ui_controller = UIController::new(
         event_receiver,
         OutputFormat::from(args.format.as_str()),
-        !args.no_color,
-        args.verbose_trades,
-        args.quiet,
-        args.price_only,
-        args.csv_export,
+        UIOptions {
+            colored: !args.no_color,
+            verbose: args.verbose_trades,
+            quiet: args.quiet,
+            price_only: args.price_only,
+            csv_export: args.csv_export,
+            max_trades: args.max_trades,
+        },
     );
 
     // Create WebSocket client

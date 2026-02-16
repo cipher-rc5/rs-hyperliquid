@@ -1,7 +1,7 @@
 /// file: src/formatter.rs
 /// description: Trade data formatting and output display utilities for various formats
 /// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
-use crate::types::{AllMids, Bbo, Book, Candle, Trade};
+use crate::types::Trade;
 
 // ANSI color codes
 pub struct Colors;
@@ -53,7 +53,7 @@ impl From<&str> for OutputFormat {
 pub struct TradeFormatter {
     format: OutputFormat,
     colored: bool,
-    _verbose: bool,
+    verbose: bool,
     quiet: bool,
     price_only: bool,
     csv_export: bool,
@@ -64,7 +64,7 @@ impl TradeFormatter {
     pub fn new(
         format: OutputFormat,
         colored: bool,
-        _verbose: bool,
+        verbose: bool,
         quiet: bool,
         price_only: bool,
         csv_export: bool,
@@ -72,7 +72,7 @@ impl TradeFormatter {
         Self {
             format,
             colored,
-            _verbose,
+            verbose,
             quiet,
             price_only,
             csv_export,
@@ -112,6 +112,14 @@ impl TradeFormatter {
         if self.csv_export {
             self.export_csv_to_stderr(trade);
         }
+
+        if self.verbose {
+            self.print_verbose_trade_details(trade);
+        }
+    }
+
+    pub fn trade_count(&self) -> u64 {
+        self.trade_count
     }
 
     fn print_table_header(&self) {
@@ -340,6 +348,24 @@ impl TradeFormatter {
         );
     }
 
+    fn print_verbose_trade_details(&self, trade: &Trade) {
+        match self.format {
+            OutputFormat::Table | OutputFormat::Minimal => {
+                let (buyer, seller) = trade.buyer_seller();
+                match (buyer, seller) {
+                    (Some(buyer), Some(seller)) => {
+                        println!("  users: buyer={} seller={}", buyer, seller);
+                    }
+                    (Some(buyer), None) => {
+                        println!("  users: buyer={}", buyer);
+                    }
+                    _ => {}
+                }
+            }
+            OutputFormat::Csv | OutputFormat::Json => {}
+        }
+    }
+
     pub fn print_status(&self, status: &str, message: &str) {
         if self.quiet && status != "ERROR" {
             return;
@@ -399,194 +425,5 @@ impl TradeFormatter {
                 total_trades, duration_secs, rate
             );
         }
-    }
-}
-
-pub struct BookFormatter;
-
-impl BookFormatter {
-    pub fn format_book(&self, book: &Book) -> String {
-        let _local_time = chrono::DateTime::from_timestamp_millis(book.time)
-            .unwrap_or_else(chrono::Utc::now)
-            .with_timezone(&chrono::Local);
-
-        let mut output = format!(
-            "{}{}[ORDER BOOK]{} {} {} | Unix: {}{}{}\n",
-            Colors::BOLD,
-            Colors::BRIGHT_BLUE,
-            Colors::RESET,
-            Colors::BRIGHT_YELLOW,
-            book.coin,
-            Colors::RESET,
-            Colors::DIM,
-            book.time
-        );
-
-        // Format asks (descending order)
-        output.push_str(&format!(
-            "{}{}ASKS{}\n",
-            Colors::BOLD,
-            Colors::BRIGHT_RED,
-            Colors::RESET
-        ));
-
-        output
-    }
-}
-
-pub struct BboFormatter;
-
-impl BboFormatter {
-    pub fn format_bbo(&self, bbo: &Bbo) -> String {
-        let _local_time = chrono::DateTime::from_timestamp_millis(bbo.time)
-            .unwrap_or_else(chrono::Utc::now)
-            .with_timezone(&chrono::Local);
-
-        let mut output = format!(
-            "{}{}[BBO]{} {} {} | Unix: {}{}{}\n",
-            Colors::BOLD,
-            Colors::BRIGHT_MAGENTA,
-            Colors::RESET,
-            Colors::BRIGHT_YELLOW,
-            bbo.coin,
-            Colors::RESET,
-            Colors::DIM,
-            bbo.time
-        );
-
-        if let Some(ref ask) = bbo.bbo.1 {
-            output.push_str(&format!(
-                "  Ask: {}{:>12.2}{} | Size: {}{:>10.6}{}\n",
-                Colors::RED,
-                ask.px,
-                Colors::RESET,
-                Colors::BRIGHT_WHITE,
-                ask.sz,
-                Colors::RESET
-            ));
-        }
-
-        if let Some(ref bid) = bbo.bbo.0 {
-            output.push_str(&format!(
-                "  Bid: {}{:>12.2}{} | Size: {}{:>10.6}{}\n",
-                Colors::GREEN,
-                bid.px,
-                Colors::RESET,
-                Colors::BRIGHT_WHITE,
-                bid.sz,
-                Colors::RESET
-            ));
-        }
-
-        // Calculate spread if both bid and ask exist
-        if let (Some(bid), Some(ask)) = (&bbo.bbo.0, &bbo.bbo.1) {
-            let spread = ask.px - bid.px;
-            let spread_pct = (spread / ask.px) * 100.0;
-            output.push_str(&format!(
-                "  Spread: {}{:.2}{} ({}{:.4}%{})\n",
-                Colors::YELLOW,
-                spread,
-                Colors::RESET,
-                Colors::YELLOW,
-                spread_pct,
-                Colors::RESET
-            ));
-        }
-
-        output
-    }
-}
-
-pub struct CandleFormatter;
-
-impl CandleFormatter {
-    pub fn format_candle(&self, candle: &Candle) -> String {
-        let open_local = candle.open_time_local();
-        let close_local = candle.close_time_local();
-
-        let change = candle.c - candle.o;
-        let change_pct = (change / candle.o) * 100.0;
-        let change_color = if change >= 0.0 {
-            Colors::GREEN
-        } else {
-            Colors::RED
-        };
-        let change_sign = if change >= 0.0 { "+" } else { "" };
-
-        format!(
-            "{}{}[CANDLE]{} {} {} | Interval: {}{}{} | {}{} - {}{}\n\
-            Open: {}{:>12.2}{} | High: {}{:>12.2}{} | Low: {}{:>12.2}{} | Close: {}{:>12.2}{}\n\
-            Change: {}{}{:.2}{} ({}{:.2}%{}) | Volume: {}{:.6}{} | Trades: {}{}{}",
-            Colors::BOLD,
-            Colors::BRIGHT_CYAN,
-            Colors::RESET,
-            Colors::BRIGHT_YELLOW,
-            candle.s,
-            Colors::RESET,
-            Colors::CYAN,
-            candle.i,
-            Colors::RESET,
-            Colors::GRAY,
-            open_local.format("%H:%M:%S"),
-            close_local.format("%H:%M:%S"),
-            Colors::RESET,
-            Colors::BRIGHT_WHITE,
-            candle.o,
-            Colors::RESET,
-            Colors::BRIGHT_WHITE,
-            candle.h,
-            Colors::RESET,
-            Colors::BRIGHT_WHITE,
-            candle.l,
-            Colors::RESET,
-            Colors::BRIGHT_WHITE,
-            candle.c,
-            Colors::RESET,
-            change_color,
-            change_sign,
-            change,
-            Colors::RESET,
-            change_color,
-            change_pct,
-            Colors::RESET,
-            Colors::BRIGHT_CYAN,
-            candle.v,
-            Colors::RESET,
-            Colors::YELLOW,
-            candle.n
-        )
-    }
-}
-
-pub struct AllMidsFormatter;
-
-impl AllMidsFormatter {
-    pub fn format_all_mids(&self, all_mids: &AllMids) -> String {
-        let mut output = format!(
-            "{}{}[ALL MIDS]{} {} symbols\n",
-            Colors::BOLD,
-            Colors::BRIGHT_YELLOW,
-            Colors::RESET,
-            all_mids.mids.len()
-        );
-
-        let mut sorted_mids: Vec<_> = all_mids.mids.iter().collect();
-        sorted_mids.sort_by(|a, b| a.0.cmp(b.0));
-
-        for (coin, price) in sorted_mids.iter() {
-            if let Ok(price_val) = price.parse::<f64>() {
-                output.push_str(&format!(
-                    "  {}{:>8}{}: {}{:>12.2}{}\n",
-                    Colors::BRIGHT_YELLOW,
-                    coin,
-                    Colors::RESET,
-                    Colors::BRIGHT_WHITE,
-                    price_val,
-                    Colors::RESET
-                ));
-            }
-        }
-
-        output
     }
 }

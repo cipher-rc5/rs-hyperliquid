@@ -1,5 +1,35 @@
-/target
-/_dev
-*.env*
+# Rust build output
+/target/
+
+# Local development scratch space
+/_dev/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and reports
+*.log
+*.out
+*.err
+*.pid
+
+# Coverage and profiling artifacts
+coverage/
+*.profraw
+*.profdata
+
+# Editor and IDE metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS and Windows file metadata
 .DS_Store
-.Cargo.lock
+Thumbs.db
+
+# Documentation and site generators
+book/
+.mdbook/

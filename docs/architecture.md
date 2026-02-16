@@ -1,131 +1,50 @@
-This Rust codebase implements a modular, event-driven WebSocket client for Hyperliquid's trading API. Here's the architectural breakdown:
+# Architecture
 
-## Core Architecture Pattern
+## System shape
 
-The system follows an **Event-Driven Architecture** with clear separation of concerns:
+`rs-hyperliquid` is an event-driven market data client with a strict split between transport, state, and presentation.
 
-```
-┌─────────────────┐    Events    ┌─────────────────┐
-│   Client Layer  │ ──────────►  │   UI Layer      │
-│  (WebSocket)    │              │ (Presentation)  │
-└─────────────────┘              └─────────────────┘
-        │                                │
-        ▼                                ▼
-┌─────────────────┐              ┌─────────────────┐
-│  State Manager  │              │   Formatters    │
-│   (Shared)      │              │   (Output)      │
-└─────────────────┘              └─────────────────┘
-```
+1. `src/main.rs` wires startup, runtime tasks, and shutdown signals.
+2. `src/client.rs` owns the WebSocket lifecycle, TLS setup, message parsing, and reconnect policy.
+3. `src/events.rs` defines the bounded event channel used to decouple ingestion from output.
+4. `src/ui.rs` consumes events and renders terminal output through `src/formatter.rs`.
+5. `src/client_state.rs` tracks connection and data-integrity counters.
+6. `src/monitoring.rs` exports Prometheus metrics for runtime observability.
 
-## Key Architectural Components
+## Runtime flow
 
-### 1. **Event System** (`events.rs`)
+1. Parse CLI args into `Config`.
+2. Initialize tracing and optional metrics endpoint.
+3. Start client and UI concurrently.
+4. Client connects, subscribes, and streams frames.
+5. Parsed messages become typed `ClientEvent` values.
+6. UI renders events and enforces optional `--max-trades` limit.
+7. Shutdown on Ctrl+C, channel close, or max-trade limit.
 
-- **Purpose**: Decouples client logic from UI presentation
-- **Pattern**: Publisher-Subscriber with typed events
-- **Key Types**: `ClientEvent` enum with variants like `TradeReceived`, `Connected`, `Reconnecting`
-- **Implementation**: Uses Tokio's unbounded channels for async communication
+## Concurrency and backpressure
 
-### 2. **State Management** (`client_state.rs`)
+- Event transport uses a bounded Tokio MPSC channel with capacity `10_000`.
+- Trade events are treated as critical and use short bounded wait (`10ms`) before counting as dropped.
+- Non-critical events use `try_send` to avoid blocking hot paths.
+- Client reconnection uses exponential backoff plus jitter.
 
-- **Purpose**: Thread-safe state sharing between components
-- **Pattern**: Shared mutable state with Arc<Mutex<>>
-- **Responsibilities**: Connection tracking, metrics, reconnection counting
-- **Thread Safety**: Uses atomic operations for counters, mutex for complex state
+## Reliability boundaries
 
-### 3. **Client Layer** (`client.rs`)
+- TLS handshake uses `rustls` with `webpki-roots`.
+- TCP connect and frame reads are guarded by configurable timeouts.
+- Invalid or duplicate trades are filtered before event emission.
+- Serialization and transport failures are converted to typed errors in `HyperliquidError`.
 
-- **Purpose**: WebSocket connection management and message handling
-- **Pattern**: Actor-like behavior with message processing loop
-- **Key Features**:
-  - Automatic reconnection with exponential backoff
-  - Message parsing and routing
-  - Health monitoring
-  - Subscription management
+## Module inventory
 
-### 4. **UI Layer** (`ui.rs`)
+- `src/cli.rs`: CLI flags and defaults.
+- `src/config.rs`: validated runtime config shape.
+- `src/types.rs`: Hyperliquid message schema and helpers.
+- `src/error.rs`: central error taxonomy.
+- `src/tracing_setup.rs`: tracing subscriber setup.
 
-- **Purpose**: Event-driven presentation logic
-- **Pattern**: Event handler that responds to client events
-- **Responsibilities**:
-  - Status display and formatting
-  - Trade data presentation
-  - Error handling and user feedback
+## Current constraints
 
-### 5. **Configuration Management** (`config.rs`)
-
-- **Purpose**: Centralized configuration with validation
-- **Pattern**: Builder pattern from CLI args
-- **Structure**: Nested config structs for different concerns (WebSocket, Metrics, etc.)
-
-## Data Flow Architecture
-
-```
-CLI Args → Config → Client + UI Controller
-                      │         │
-                      ▼         ▼
-                 Event Bus ←────┘
-                      │
-                      ▼
-              State Updates + UI Rendering
-```
-
-### Message Processing Pipeline:
-
-1. **WebSocket Message** → Raw bytes
-2. **Deserialization** → Typed `WebSocketMessage` enum
-3. **Event Generation** → `ClientEvent` variants
-4. **Event Broadcasting** → Via channels
-5. **UI Handling** → Formatted output
-
-## Design Patterns Used
-
-### 1. **Type-Safe Message Handling**
-
-- Uses Serde with untagged enums for WebSocket message parsing
-- Custom deserializers for string-to-float conversions
-- Comprehensive type definitions matching Hyperliquid's API
-
-### 2. **Error Handling Strategy**
-
-- Custom error types with `thiserror`
-- Graceful degradation on connection failures
-- Structured error propagation through Result types
-
-### 3. **Concurrent Architecture**
-
-- **tokio::select!** for graceful shutdown
-- Separate async tasks for client and UI
-- Non-blocking message processing
-
-### 4. **Plugin Architecture**
-
-- Modular formatters for different output types (Table, CSV, JSON)
-- Optional metrics collection with Prometheus
-- Configurable logging with tracing
-
-## Key Architectural Strengths
-
-1. **Separation of Concerns**: Clear boundaries between networking, state, and presentation
-2. **Testability**: Event-driven design allows easy mocking and testing
-3. **Extensibility**: New event types and formatters can be added without changing core logic
-4. **Reliability**: Robust error handling and reconnection logic
-5. **Performance**: Async/await throughout, minimal allocations in hot paths
-6. **Observability**: Structured logging and optional metrics collection
-
-## Trade-offs and Considerations
-
-**Pros:**
-
-- Clean, maintainable architecture
-- Good separation of concerns
-- Robust error handling
-- Easy to extend and test
-
-**Cons:**
-
-- Some complexity overhead from the event system
-- Multiple layers of abstraction
-- Could be overkill for simpler use cases
-
-This architecture is well-suited for a production trading client that needs reliability, observability, and maintainability while handling real-time market data streams.
+- UI and ingestion run in the same process and share one event queue; this is simple and low-latency but ties rendering pressure to transport pressure.
+- The client currently starts with trade subscription defaults; broad multi-channel subscription orchestration is not yet centralized.
+- Test coverage is currently minimal and should be expanded before adding new strategy logic.

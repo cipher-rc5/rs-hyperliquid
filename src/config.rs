@@ -11,8 +11,6 @@ pub struct Config {
     pub websocket: WebSocketConfig,
     pub subscription: SubscriptionConfig,
     pub metrics: MetricsConfig,
-    pub health: HealthConfig,
-    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -35,16 +33,6 @@ pub struct MetricsConfig {
     pub port: u16,
 }
 
-#[derive(Debug, Clone)]
-pub struct HealthConfig {
-    pub check_interval: Duration,
-}
-
-#[derive(Debug, Clone)]
-pub struct LoggingConfig {
-    pub verbose_trades: bool,
-}
-
 impl Config {
     pub fn from_args(args: &Args) -> Result<Self> {
         let url = Url::parse(&args.url)?;
@@ -63,12 +51,6 @@ impl Config {
             metrics: MetricsConfig {
                 enabled: args.metrics,
                 port: args.metrics_port,
-            },
-            health: HealthConfig {
-                check_interval: Duration::from_secs(args.health_check_interval),
-            },
-            logging: LoggingConfig {
-                verbose_trades: args.verbose_trades,
             },
         })
     }

@@ -1,13 +1,22 @@
 # AGENTS.md
 
+## OpenCode Integration
+
+- OpenCode config is defined in `opencode.json` with schema `https://opencode.ai/config.json`
+- Shared instruction files are in `docs/rules/`
+- Prefer loading guidance from `docs/rules/opencode-core.md` and `docs/rules/opencode-rust.md` for implementation tasks
+- If a task mentions `@docs/...` references, read only the relevant file for the current task scope
+
 ## Build, Lint, and Test Commands
 
-- **Build**: `cargo build`
+- **Build**: `just build`
 - **Build with tests**: `cargo build --tests`
-- **Lint**: `cargo clippy`
-- **Run all tests**: `cargo test`
+- **Lint**: `just lint`
+- **Run all tests**: `just test`
 - **Run a single test**: `cargo test <test_name>`
-- **Format code**: `cargo fmt`
+- **Format code**: `just fmt`
+- **Full local gate**: `just check`
+- **CI parity gate**: `just ci`
 
 ## Code Style Guidelines
 

@@ -3,7 +3,7 @@
 /// reference: https://docs.rs/metrics-exporter-prometheus/latest/metrics_exporter_prometheus/
 use crate::error::HyperliquidError;
 use anyhow::Result;
-use metrics::{counter, gauge, Counter, Gauge};
+use metrics::{Counter, Gauge, counter, gauge};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{net::SocketAddr, sync::LazyLock};
 use tracing::{error, info};
@@ -20,8 +20,6 @@ pub static CONNECTED_GAUGE: LazyLock<Gauge> = LazyLock::new(|| gauge!("hyperliqu
 // Data integrity metrics
 pub static DUPLICATE_TRADES: LazyLock<Counter> =
     LazyLock::new(|| counter!("hyperliquid_duplicate_trades_total"));
-pub static SEQUENCE_GAPS: LazyLock<Counter> =
-    LazyLock::new(|| counter!("hyperliquid_sequence_gaps_total"));
 pub static INVALID_TIMESTAMPS: LazyLock<Counter> =
     LazyLock::new(|| counter!("hyperliquid_invalid_timestamps_total"));
 pub static EVENTS_DROPPED: LazyLock<Counter> =

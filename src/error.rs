@@ -29,9 +29,6 @@ pub enum HyperliquidError {
     #[error("Subscription failed: {message}")]
     SubscriptionFailed { message: String },
 
-    #[error("Health check failed: {reason}")]
-    HealthCheckFailed { reason: String },
-
     #[error("Maximum reconnection attempts exceeded")]
     MaxReconnectsExceeded,
 

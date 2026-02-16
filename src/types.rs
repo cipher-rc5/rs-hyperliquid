@@ -245,21 +245,17 @@ impl Trade {
 
     /// Check if this is a buy trade
     pub fn is_buy(&self) -> bool {
-        self.side.to_uppercase() == "B" || self.side.to_uppercase() == "BUY"
+        self.side.eq_ignore_ascii_case("B") || self.side.eq_ignore_ascii_case("BUY")
     }
 
     /// Check if this is a sell trade
     pub fn is_sell(&self) -> bool {
-        self.side.to_uppercase() == "S" || self.side.to_uppercase() == "SELL"
+        self.side.eq_ignore_ascii_case("S") || self.side.eq_ignore_ascii_case("SELL")
     }
 
     /// Get formatted side string
     pub fn side_formatted(&self) -> &'static str {
-        if self.is_buy() {
-            "BUY"
-        } else {
-            "SELL"
-        }
+        if self.is_buy() { "BUY" } else { "SELL" }
     }
 
     /// Get buyer and seller addresses

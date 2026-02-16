@@ -4,43 +4,57 @@ use crate::{
     events::{ClientEvent, EventReceiver},
     formatter::{Colors, OutputFormat, TradeFormatter},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 pub struct UIController {
     event_receiver: EventReceiver,
     trade_formatter: TradeFormatter,
     quiet_mode: bool,
     header_printed: bool,
+    max_trades: Option<u64>,
+}
+
+pub struct UIOptions {
+    pub colored: bool,
+    pub verbose: bool,
+    pub quiet: bool,
+    pub price_only: bool,
+    pub csv_export: bool,
+    pub max_trades: u64,
 }
 
 impl UIController {
-    pub fn new(
-        event_receiver: EventReceiver,
-        format: OutputFormat,
-        colored: bool,
-        verbose: bool,
-        quiet: bool,
-        price_only: bool,
-        csv_export: bool,
-    ) -> Self {
+    pub fn new(event_receiver: EventReceiver, format: OutputFormat, options: UIOptions) -> Self {
         Self {
             event_receiver,
             trade_formatter: TradeFormatter::new(
-                format, colored, verbose, quiet, price_only, csv_export,
+                format,
+                options.colored,
+                options.verbose,
+                options.quiet,
+                options.price_only,
+                options.csv_export,
             ),
-            quiet_mode: quiet,
-            header_printed: false, // Initialize as false
+            quiet_mode: options.quiet,
+            header_printed: false,
+            max_trades: if options.max_trades == 0 {
+                None
+            } else {
+                Some(options.max_trades)
+            },
         }
     }
 
     pub async fn run(&mut self) {
         self.print_startup_banner();
         while let Some(event) = self.event_receiver.recv().await {
-            self.handle_event(event).await;
+            if !self.handle_event(event).await {
+                break;
+            }
         }
     }
 
-    async fn handle_event(&mut self, event: ClientEvent) {
+    async fn handle_event(&mut self, event: ClientEvent) -> bool {
         match event {
             ClientEvent::Starting => {
                 info!("Client starting...");
@@ -69,6 +83,16 @@ impl UIController {
                     self.header_printed = true;
                 }
                 self.trade_formatter.print_trade(&trade);
+
+                if let Some(max_trades) = self.max_trades
+                    && self.trade_formatter.trade_count() >= max_trades
+                {
+                    self.print_connection_status(
+                        "STOPPING",
+                        &format!("Reached configured max trades ({max_trades})"),
+                    );
+                    return false;
+                }
             }
             ClientEvent::MessageReceived { raw_message } => {
                 debug!("Received message: {}", raw_message);
@@ -82,9 +106,6 @@ impl UIController {
             } => {
                 self.print_reconnect_info(delay_secs, attempt);
             }
-            ClientEvent::HealthCheckFailed { reason } => {
-                warn!("Health check failed: {}", reason);
-            }
             ClientEvent::Disconnected => {
                 self.print_connection_status("DISCONNECTED", "Connection closed");
             }
@@ -92,6 +113,8 @@ impl UIController {
                 self.print_connection_status("STOPPING", "Client shutting down");
             }
         }
+
+        true
     }
 
     fn print_startup_banner(&self) {

@@ -13,10 +13,10 @@ use crate::{
 };
 use anyhow::Result;
 use fastwebsockets::{Frame, OpCode, WebSocket};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::net::TcpStream;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, trace, warn};
 
 enum MaybeTlsStream {
@@ -76,7 +76,6 @@ pub struct HyperliquidWebSocketClient {
     pub state: SharedClientState,
 }
 
-#[allow(dead_code)]
 impl HyperliquidWebSocketClient {
     pub fn new(config: Arc<Config>, event_sender: EventSender, state: SharedClientState) -> Self {
         Self {
@@ -127,12 +126,16 @@ impl HyperliquidWebSocketClient {
         let port = url.port_or_known_default().unwrap_or(443);
 
         // Establish TCP connection
-        let stream = TcpStream::connect(format!("{}:{}", host, port))
-            .await
-            .map_err(|e| {
-                error!("Failed to connect to TCP stream: {}", e);
-                HyperliquidError::IoError(e)
-            })?;
+        let stream = timeout(
+            self.config.websocket.timeout,
+            TcpStream::connect(format!("{}:{}", host, port)),
+        )
+        .await
+        .map_err(|_| HyperliquidError::Timeout)?
+        .map_err(|e| {
+            error!("Failed to connect to TCP stream: {}", e);
+            HyperliquidError::IoError(e)
+        })?;
 
         // Perform TLS handshake for wss://
         let mut stream = if url.scheme() == "wss" {
@@ -261,10 +264,13 @@ impl HyperliquidWebSocketClient {
         info!("Starting message handling loop");
 
         loop {
-            let frame = ws.read_frame().await.map_err(|e| {
-                error!("WebSocket read error: {}", e);
-                HyperliquidError::WebSocketError(format!("{}", e))
-            })?;
+            let frame = timeout(self.config.websocket.timeout, ws.read_frame())
+                .await
+                .map_err(|_| HyperliquidError::Timeout)?
+                .map_err(|e| {
+                    error!("WebSocket read error: {}", e);
+                    HyperliquidError::WebSocketError(format!("{}", e))
+                })?;
 
             match frame.opcode {
                 OpCode::Text | OpCode::Binary => {
@@ -290,7 +296,11 @@ impl HyperliquidWebSocketClient {
         }
     }
 
-    async fn handle_connection_error(&mut self, _error: anyhow::Error) -> Result<()> {
+    async fn handle_connection_error(&mut self, error: anyhow::Error) -> Result<()> {
+        let _ = self
+            .send_event(ClientEvent::ConnectionFailed(error.to_string()))
+            .await;
+
         {
             let mut state = self.state.lock().await;
             state.increment_reconnect();
@@ -592,11 +602,7 @@ impl HyperliquidWebSocketClient {
         for candle in candles {
             trace!(
                 "Candle data for {} - O: {}, H: {}, L: {}, C: {}",
-                candle.s,
-                candle.o,
-                candle.h,
-                candle.l,
-                candle.c
+                candle.s, candle.o, candle.h, candle.l, candle.c
             );
         }
         Ok(())

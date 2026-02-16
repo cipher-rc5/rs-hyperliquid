@@ -16,7 +16,6 @@ pub enum ClientEvent {
     MessageReceived { raw_message: String },
     ConnectionFailed(String),
     Reconnecting { attempt: u32, delay_secs: u64 },
-    HealthCheckFailed { reason: String },
     Disconnected,
     Stopping,
 }

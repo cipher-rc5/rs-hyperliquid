@@ -1,0 +1,44 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "AGENTS.md",
+    "docs/rules/*.md",
+    "docs/architecture.md",
+    "docs/testing-plan.md",
+    "docs/technical-analysis.md"
+  ],
+  "watcher": {
+    "ignore": [
+      ".git/**",
+      "target/**",
+      "_dev/**"
+    ]
+  },
+  "command": {
+    "check": {
+      "description": "Run local quality gate",
+      "template": "Run the local quality gate with just and report concise results.\n\nOutput:\n!`just check`\n\nIf anything fails, identify root cause and propose a minimal fix plan."
+    },
+    "ci": {
+      "description": "Run CI parity gate",
+      "template": "Run the CI parity gate and summarize pass/fail status by step.\n\nOutput:\n!`just ci`\n\nIf failures appear, provide the shortest actionable remediation list."
+    },
+    "lint": {
+      "description": "Run clippy lint gate",
+      "template": "Run lint checks and summarize warnings or errors.\n\nOutput:\n!`just lint`\n\nIf lint fails, list exact files and changes needed."
+    },
+    "test": {
+      "description": "Run full Rust test suite",
+      "template": "Run tests and report failures with likely causes.\n\nOutput:\n!`just test`\n\nIf tests fail, suggest a focused fix strategy."
+    },
+    "doc": {
+      "description": "Build rustdoc and docs checks",
+      "template": "Run documentation checks and rustdoc generation.\n\nOutput:\n!`just docs-no-emoji && just doc`\n\nSummarize generated doc entry point and any issues."
+    },
+    "perf": {
+      "description": "Run high-level performance review",
+      "template": "Perform a targeted performance review for this Rust codebase with emphasis on hot paths, allocation patterns, lock contention, and I/O pressure.\nUse @src/client.rs @src/formatter.rs @src/ui.rs @src/types.rs @src/client_state.rs and propose prioritized optimizations with expected impact and risk."
+    }
+  },
+  "share": "manual"
+}
