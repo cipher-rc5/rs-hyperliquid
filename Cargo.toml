@@ -10,7 +10,7 @@ keywords = ["hyperliquid", "websocket", "trading", "cryptocurrency", "real-time"
 license = "MIT"
 readme = "readme.md"
 repository = "https://github.com/cipher-rc5/rs-hyperliquid"
-rust-version = "1.91"
+rust-version = "1.93"
 description = "High-performance WebSocket client for Hyperliquid trading data with real-time market data streaming"
 
 [[bin]]
