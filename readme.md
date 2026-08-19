@@ -1,3 +1,5 @@
+
+
 # rs-hyperliquid
 
 [![Crates.io](https://img.shields.io/crates/v/rs-hyperliquid)](https://crates.io/crates/rs-hyperliquid)
@@ -187,7 +189,7 @@ rs-hyperliquid --coin BTC --json-logs --log-level debug 2> app.log
 ## Architecture
 
 - **Async Runtime**: Built on tokio for efficient concurrency
-- **WebSocket**: tokio-tungstenite with TLS support
+- **WebSocket**: fastwebsockets with TLS support
 - **Resilience**: Automatic reconnection with exponential backoff
 - **Health Monitoring**: Proactive connection health checks
 - **Observability**: Structured logging with tracing and Prometheus metrics
