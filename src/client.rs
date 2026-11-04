@@ -1,6 +1,16 @@
 /// file: src/client.rs
 /// description: WebSocket client implementation for Hyperliquid exchange data streaming
 /// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use fastwebsockets::{Frame, OpCode, WebSocket};
+use tokio::net::TcpStream;
+use tokio::time::{sleep, timeout};
+use tracing::{debug, error, info, trace, warn};
+
 use crate::{
     client_state::SharedClientState,
     config::Config,
@@ -11,13 +21,15 @@ use crate::{
         WebSocketMessage,
     },
 };
-use anyhow::Result;
-use fastwebsockets::{Frame, OpCode, WebSocket};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use tokio::net::TcpStream;
-use tokio::time::{sleep, timeout};
-use tracing::{debug, error, info, trace, warn};
+
+/// Generate an RFC 6455 WebSocket handshake key using 16 bytes of OS randomness.
+///
+/// Returns an error if the operating system cannot supply random bytes.
+pub fn generate_websocket_key() -> Result<String> {
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).context("Failed to generate WebSocket handshake key")?;
+    Ok(STANDARD.encode(nonce))
+}
 
 enum MaybeTlsStream {
     Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
@@ -166,7 +178,7 @@ impl HyperliquidWebSocketClient {
         // Perform WebSocket handshake
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let key = fastwebsockets::handshake::generate_key();
+        let key = generate_websocket_key()?;
         let handshake_req = format!(
             "GET {} HTTP/1.1\r\n\
              Host: {}\r\n\
@@ -655,6 +667,207 @@ impl HyperliquidWebSocketClient {
                 "Processing trade metrics"
             );
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use anyhow::Result;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use clap::Parser;
+    use fastwebsockets::{Frame, OpCode, Payload, Role, WebSocket};
+    use serde_json::json;
+    use tokio::io::duplex;
+    use tokio::sync::Mutex;
+    use tokio::time::timeout;
+
+    use super::{HyperliquidWebSocketClient, generate_websocket_key};
+    use crate::{
+        cli::Args,
+        client_state::ClientState,
+        config::Config,
+        error::HyperliquidError,
+        events::{ClientEvent, EventReceiver, create_event_channel},
+    };
+
+    fn test_client() -> (HyperliquidWebSocketClient, EventReceiver) {
+        let args = Args::parse_from(["rs-hyperliquid", "--coin", "BTC"]);
+        let config = Arc::new(Config::from_args(&args).expect("valid test configuration"));
+        let state = Arc::new(Mutex::new(ClientState::new()));
+        let (sender, receiver) = create_event_channel();
+        (
+            HyperliquidWebSocketClient::new(config, sender, state),
+            receiver,
+        )
+    }
+
+    fn trade_message(ids: &[i64]) -> String {
+        let trades: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                json!({
+                    "coin": "BTC",
+                    "side": "B",
+                    "px": "100000.5",
+                    "sz": "0.25",
+                    "time": 1760000000000_i64,
+                    "hash": "0x1234",
+                    "tid": id,
+                    "users": ["buyer", "seller"]
+                })
+            })
+            .collect();
+        json!({"channel": "trades", "data": trades}).to_string()
+    }
+
+    #[test]
+    fn websocket_keys_are_random_padded_base64_nonces() -> Result<()> {
+        let first = generate_websocket_key()?;
+        let second = generate_websocket_key()?;
+        for key in [&first, &second] {
+            assert_eq!(key.len(), 24);
+            assert!(key.ends_with("=="));
+            assert_eq!(STANDARD.decode(key)?.len(), 16);
+        }
+        assert_ne!(first, second);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn websocket_subscription_trades_ping_and_close() -> Result<()> {
+        let (mut client, mut receiver) = test_client();
+        let (client_stream, server_stream) = duplex(8192);
+        let mut ws = WebSocket::after_handshake(client_stream, Role::Client);
+        let mut server = WebSocket::after_handshake(server_stream, Role::Server);
+
+        let server_exchange = async {
+            let frame = server.read_frame().await?;
+            assert_eq!(frame.opcode, OpCode::Text);
+            let request: serde_json::Value = serde_json::from_slice(&frame.payload)?;
+            assert_eq!(
+                request,
+                json!({
+                    "method": "subscribe",
+                    "subscription": {"type": "trades", "coin": "BTC"}
+                })
+            );
+
+            let confirmation = json!({
+                "channel": "subscriptionResponse",
+                "data": request
+            })
+            .to_string();
+            server
+                .write_frame(Frame::text(Payload::Borrowed(confirmation.as_bytes())))
+                .await?;
+            server
+                .write_frame(Frame::new(
+                    true,
+                    OpCode::Ping,
+                    None,
+                    Payload::Borrowed(b"health-check"),
+                ))
+                .await?;
+            let pong = server.read_frame().await?;
+            assert_eq!(pong.opcode, OpCode::Pong);
+            assert_eq!(&*pong.payload, b"health-check");
+
+            let trades = trade_message(&[42, 42, 43]);
+            server
+                .write_frame(Frame::text(Payload::Borrowed(trades.as_bytes())))
+                .await?;
+            server.write_frame(Frame::close(1000, b"done")).await?;
+            assert_eq!(server.read_frame().await?.opcode, OpCode::Close);
+            Ok::<_, anyhow::Error>(())
+        };
+
+        let client_exchange = async {
+            client.send_subscription(&mut ws).await?;
+            let error = client
+                .handle_message_stream(&mut ws)
+                .await
+                .expect_err("server closes the connection");
+            assert!(matches!(
+                error.downcast_ref::<HyperliquidError>(),
+                Some(HyperliquidError::ConnectionClosed)
+            ));
+            Ok::<_, anyhow::Error>(())
+        };
+
+        timeout(Duration::from_secs(5), async {
+            tokio::try_join!(client_exchange, server_exchange)
+        })
+        .await??;
+
+        let mut trades = Vec::new();
+        let mut confirmed = false;
+        let mut disconnected = false;
+        while let Ok(event) = receiver.try_recv() {
+            match event {
+                ClientEvent::SubscriptionConfirmed { sub_type, coin } => {
+                    assert_eq!(sub_type, "trades");
+                    assert_eq!(coin, "BTC");
+                    confirmed = true;
+                }
+                ClientEvent::TradeReceived(trade) => trades.push(trade),
+                ClientEvent::Disconnected => disconnected = true,
+                _ => {}
+            }
+        }
+        assert!(confirmed);
+        assert!(disconnected);
+        assert_eq!(
+            trades.iter().map(|trade| trade.tid).collect::<Vec<_>>(),
+            [42, 43]
+        );
+        assert_eq!(trades[0].px, 100000.5);
+        assert_eq!(trades[0].sz, 0.25);
+
+        let state = client.state.lock().await;
+        assert_eq!(state.trade_count.load(Ordering::Relaxed), 2);
+        assert_eq!(state.duplicate_trades.load(Ordering::Relaxed), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_message_does_not_interrupt_trades_or_read_timeout() -> Result<()> {
+        let (mut client, mut receiver) = test_client();
+        Arc::make_mut(&mut client.config).websocket.timeout = Duration::from_millis(50);
+        let (client_stream, server_stream) = duplex(8192);
+        let mut ws = WebSocket::after_handshake(client_stream, Role::Client);
+        let mut server = WebSocket::after_handshake(server_stream, Role::Server);
+
+        server
+            .write_frame(Frame::text(Payload::Borrowed(b"invalid json")))
+            .await?;
+        let trades = trade_message(&[123]);
+        server
+            .write_frame(Frame::text(Payload::Borrowed(trades.as_bytes())))
+            .await?;
+
+        let error = timeout(
+            Duration::from_secs(5),
+            client.handle_message_stream(&mut ws),
+        )
+        .await?
+        .expect_err("idle server triggers the configured timeout");
+        assert!(matches!(
+            error.downcast_ref::<HyperliquidError>(),
+            Some(HyperliquidError::Timeout)
+        ));
+
+        let mut trade_ids = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            if let ClientEvent::TradeReceived(trade) = event {
+                trade_ids.push(trade.tid);
+            }
+        }
+        assert_eq!(trade_ids, [123]);
         Ok(())
     }
 }

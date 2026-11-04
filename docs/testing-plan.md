@@ -50,3 +50,10 @@ Every PR should pass:
 - lint check with warnings denied
 - full test run
 - docs hygiene checks
+
+## Dependency upgrade regression coverage
+
+Tests in `src/client.rs` cover RFC 6455 handshake-key encoding and randomness,
+subscription messages, subscription confirmation, trade decoding, duplicate
+filtering, ping/pong responses, close frames, malformed messages, and read timeouts.
+The WebSocket tests use in-memory Tokio streams and require no external service.

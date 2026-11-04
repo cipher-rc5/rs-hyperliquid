@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rs-hyperliquid)](https://crates.io/crates/rs-hyperliquid)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://rustup.rs/)
+[![Rust](https://img.shields.io/badge/rust-1.99.1-brightgreen.svg)](https://rustup.rs/)
 
 A high-performance, production-ready WebSocket client for streaming real-time trading data from the [Hyperliquid](https://hyperliquid.xyz) exchange. Built with Rust for maximum reliability, minimal latency, and enterprise-grade observability.
 
@@ -18,6 +18,8 @@ A high-performance, production-ready WebSocket client for streaming real-time tr
 ## Quick Start
 
 ### Installation
+
+Building from source requires Rust 1.99.1 or newer. The repository pins Rust 1.99.1 with `rust-toolchain.toml` for local development and CI.
 
 ```bash
 # From crates.io

@@ -1,4 +1,5 @@
 use fastwebsockets::{Frame, OpCode, WebSocket};
+use rs_hyperliquid::client::generate_websocket_key;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -32,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tls_stream = connector.connect(domain, stream).await?;
 
     // Perform WebSocket handshake
-    let key = fastwebsockets::handshake::generate_key();
+    let key = generate_websocket_key()?;
     let handshake_req = format!(
         "GET {} HTTP/1.1\r\n\
          Host: {}\r\n\
