@@ -26,10 +26,10 @@ The main maturity gap is validation depth (tests, failure-mode simulation, and b
 
 ## Risks and improvement priorities
 
-1. **Test gap**: no unit tests currently run; this is the highest reliability risk.
+1. **Test gap**: transport, trade validation, formatting, and backpressure have regression coverage; connection establishment and reconnect failure cases still need dedicated fixtures.
 2. **Backpressure policy**: non-critical event drops are acceptable, but sustained overload behavior needs explicit SLOs.
 3. **Protocol validation**: handshake and parser behavior should be covered by fixture-based tests for schema drift.
-4. **Performance budget**: no benchmark guardrails for latency per trade and throughput under burst conditions.
+4. **Performance budget**: a local replay benchmark measures throughput and process CPU time; per-trade latency thresholds and CI regression budgets remain to be established.
 5. **Operational envelope**: reconnect tuning exists, but max queue and timeout defaults should be validated against realistic venue incidents.
 
 ## Dead-code and unimplemented-code audit

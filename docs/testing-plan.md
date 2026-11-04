@@ -57,3 +57,8 @@ Tests in `src/client.rs` cover RFC 6455 handshake-key encoding and randomness,
 subscription messages, subscription confirmation, trade decoding, duplicate
 filtering, ping/pong responses, close frames, malformed messages, and read timeouts.
 The WebSocket tests use in-memory Tokio streams and require no external service.
+
+Additional tests cover shared validation for direct and wrapped trade batches,
+bounded-channel backpressure and closure, JSON/CSV output compatibility, escaping,
+non-finite JSON numbers, and numeric strings with JSON escapes. Run the repeatable
+local feed replay in `scripts/benchmark_replay.py` as described in `docs/performance.md`.

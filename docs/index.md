@@ -4,6 +4,7 @@
 - `docs/usage.md`: CLI usage and operational examples
 - `docs/technical-analysis.md`: critical high-level engineering assessment
 - `docs/testing-plan.md`: staged test strategy and priorities
+- `docs/performance.md`: optimization results and repeatable local replay benchmark
 - `docs/cargo-manifest.md`: Cargo.toml dependency and profile rationale
 - `docs/rustdoc.md`: rustdoc landing page included in crate docs
 - `docs/rules/opencode-core.md`: OpenCode workflow and safety rules

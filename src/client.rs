@@ -17,7 +17,7 @@ use crate::{
     error::HyperliquidError,
     events::{ClientEvent, EventSender},
     types::{
-        AllMids, Bbo, Book, Candle, Notification, SubscriptionRequest, Trade, UserEvent,
+        CandleDataMessage, SubscriptionRequest, Trade, TradeDataMessage, UserEvent,
         WebSocketMessage,
     },
 };
@@ -259,13 +259,10 @@ impl HyperliquidWebSocketClient {
             HyperliquidError::WebSocketError(format!("{}", e))
         })?;
 
-        let _ = self
-            .send_event(ClientEvent::SubscriptionSent {
-                message: message.clone(),
-            })
-            .await;
-
         info!("Sent subscription: {}", message);
+        let _ = self
+            .send_event(ClientEvent::SubscriptionSent { message })
+            .await;
         Ok(())
     }
 
@@ -313,13 +310,9 @@ impl HyperliquidWebSocketClient {
             .send_event(ClientEvent::ConnectionFailed(error.to_string()))
             .await;
 
-        {
+        let reconnect_count = {
             let mut state = self.state.lock().await;
             state.increment_reconnect();
-        }
-
-        let reconnect_count = {
-            let state = self.state.lock().await;
             state.reconnect_count.load(Ordering::Relaxed)
         };
 
@@ -364,75 +357,59 @@ impl HyperliquidWebSocketClient {
     }
 
     async fn send_event(&self, event: ClientEvent) -> Result<()> {
-        // CRITICAL: Differentiate between critical (trades) and non-critical events
-        let is_critical = matches!(event, ClientEvent::TradeReceived(_));
+        use tokio::sync::mpsc::error::TrySendError;
 
-        if is_critical {
-            // NEVER drop trade data - block if needed (with short timeout)
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(10), // 10ms max wait for trades
+        let closed = || HyperliquidError::EventSendError("Channel closed".to_string());
+        let event = match self.event_sender.try_send(event) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Closed(_)) => return Err(closed().into()),
+            Err(TrySendError::Full(event)) => event,
+        };
+
+        // Only create a timeout when a trade actually encounters backpressure.
+        if matches!(event, ClientEvent::TradeReceived(_)) {
+            match timeout(
+                std::time::Duration::from_millis(10),
                 self.event_sender.send(event),
             )
             .await
             {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => {
-                    error!("Critical: Event channel closed: {}", e);
-                    Err(HyperliquidError::EventSendError("Channel closed".to_string()).into())
-                }
-                Err(_) => {
-                    // Even trade events can't wait forever - 10ms timeout exceeded
-                    error!("CRITICAL: Trade event dropped due to channel timeout!");
-                    crate::monitoring::EVENTS_DROPPED.increment(1);
-                    Ok(()) // Continue processing to avoid cascade failure
-                }
-            }
-        } else {
-            // Non-critical events: use try_send (zero-wait)
-            match self.event_sender.try_send(event) {
-                Ok(()) => Ok(()),
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    // Drop non-critical events silently if channel full
-                    crate::monitoring::EVENTS_DROPPED.increment(1);
-                    Ok(())
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    Err(HyperliquidError::EventSendError("Channel closed".to_string()).into())
-                }
+                Ok(result) => return result.map_err(|_| closed().into()),
+                Err(_) => error!("Trade event dropped due to channel timeout"),
             }
         }
+        crate::monitoring::EVENTS_DROPPED.increment(1);
+        Ok(())
     }
 
     async fn handle_frame(&mut self, frame: Frame<'_>) -> Result<()> {
         match frame.opcode {
             OpCode::Text => {
-                // Use Cow to avoid allocation when UTF-8 is valid (common case)
-                let text = String::from_utf8_lossy(&frame.payload);
-
-                if tracing::level_enabled!(tracing::Level::TRACE) {
-                    trace!("Received text message: {}", text);
-                }
+                trace!(
+                    "Received text message: {}",
+                    String::from_utf8_lossy(&frame.payload)
+                );
 
                 // Only send message received event if in verbose mode
                 // to avoid unnecessary allocations
                 if tracing::level_enabled!(tracing::Level::DEBUG) {
                     let _ = self
                         .send_event(ClientEvent::MessageReceived {
-                            raw_message: text.to_string(),
+                            raw_message: String::from_utf8_lossy(&frame.payload).into_owned(),
                         })
                         .await;
                 }
 
-                // HFT CRITICAL: Skip message counting in hot path to eliminate lock
-                // Metrics are updated via TRADE_COUNTER instead
-
-                // Parse directly from the Cow reference to avoid allocation
-                match serde_json::from_str::<WebSocketMessage>(text.as_ref()) {
+                match serde_json::from_slice::<WebSocketMessage>(&frame.payload) {
                     Ok(ws_message) => {
                         self.handle_websocket_message(ws_message).await?;
                     }
                     Err(e) => {
-                        warn!("Failed to parse message: {}. Raw: {}", e, text);
+                        warn!(
+                            "Failed to parse message: {}. Raw: {}",
+                            e,
+                            String::from_utf8_lossy(&frame.payload)
+                        );
                         return Err(HyperliquidError::InvalidMessage(e.to_string()).into());
                     }
                 }
@@ -454,25 +431,28 @@ impl HyperliquidWebSocketClient {
                 info!("Subscription response received");
                 let _ = self
                     .send_event(ClientEvent::SubscriptionConfirmed {
-                        sub_type: response.data.subscription.subscription_type.clone(),
-                        coin: response.data.subscription.coin.clone(),
+                        sub_type: response.data.subscription.subscription_type,
+                        coin: response.data.subscription.coin,
                     })
                     .await;
             }
 
-            WebSocketMessage::TradeData(trade_data) => {
-                debug!("Processing {} trades", trade_data.data.len());
-                self.handle_trade_data(trade_data).await?;
+            WebSocketMessage::TradeData(TradeDataMessage { data: trades, .. })
+            | WebSocketMessage::DirectTrades(trades) => {
+                self.handle_trades(trades).await?;
             }
 
             WebSocketMessage::BookData(book_data) => {
                 debug!("Processing order book data for {}", book_data.data.coin);
-                self.handle_book_data(book_data.data).await?;
+                trace!(
+                    "Order book has {} bids and {} asks",
+                    book_data.data.levels.0.len(),
+                    book_data.data.levels.1.len()
+                );
             }
 
             WebSocketMessage::BboData(bbo_data) => {
                 debug!("Processing BBO data for {}", bbo_data.data.coin);
-                self.handle_bbo_data(bbo_data.data).await?;
             }
 
             WebSocketMessage::AllMidsData(all_mids_data) => {
@@ -480,17 +460,22 @@ impl HyperliquidWebSocketClient {
                     "Processing all mids data for {} symbols",
                     all_mids_data.data.mids.len()
                 );
-                self.handle_all_mids_data(all_mids_data.data).await?;
             }
 
-            WebSocketMessage::CandleData(candle_data) => {
-                debug!("Processing {} candles", candle_data.data.len());
-                self.handle_candle_data(candle_data.data).await?;
+            WebSocketMessage::CandleData(CandleDataMessage { data: candles, .. })
+            | WebSocketMessage::DirectCandles(candles) => {
+                debug!("Processing {} candles", candles.len());
+                for candle in candles {
+                    trace!(
+                        "Candle data for {} - O: {}, H: {}, L: {}, C: {}",
+                        candle.s, candle.o, candle.h, candle.l, candle.c
+                    );
+                }
             }
 
             WebSocketMessage::UserEvent(user_event) => {
                 debug!("Processing user event");
-                self.handle_user_event(user_event.data).await?;
+                self.handle_user_event(user_event.data);
             }
 
             WebSocketMessage::Notification(notification) => {
@@ -498,38 +483,6 @@ impl HyperliquidWebSocketClient {
                     "Processing notification: {}",
                     notification.data.notification
                 );
-                self.handle_notification(notification.data).await?;
-            }
-
-            WebSocketMessage::DirectTrades(trades) => {
-                debug!("Processing {} direct trades", trades.len());
-
-                // Batch validation and lock acquisition
-                let valid_trades: Vec<_> = {
-                    let mut state = self.state.lock().await;
-                    trades
-                        .into_iter()
-                        .filter(|trade| {
-                            if !state.validate_trade_sequence(&trade.coin, trade.tid) {
-                                crate::monitoring::DUPLICATE_TRADES.increment(1);
-                                return false;
-                            }
-                            state.record_trade();
-                            true
-                        })
-                        .collect()
-                };
-
-                for trade in valid_trades {
-                    let _ = self
-                        .send_event(ClientEvent::TradeReceived(Arc::new(trade)))
-                        .await;
-                }
-            }
-
-            WebSocketMessage::DirectCandles(candles) => {
-                debug!("Processing {} direct candles", candles.len());
-                self.handle_candle_data(candles).await?;
             }
             WebSocketMessage::Ping(ping) => {
                 debug!("Received ping message: {:?}", ping);
@@ -538,89 +491,47 @@ impl HyperliquidWebSocketClient {
         Ok(())
     }
 
-    async fn handle_trade_data(
-        &mut self,
-        trade_data: crate::types::TradeDataMessage,
-    ) -> Result<()> {
-        // Batch lock acquisition - single lock for all trades
-        let valid_trades: Vec<_> = {
+    async fn handle_trades(&mut self, mut trades: Vec<Trade>) -> Result<()> {
+        // Reuse the decoded batch and release the state lock before sending events.
+        {
             let mut state = self.state.lock().await;
-
-            trade_data
-                .data
-                .into_iter()
-                .filter(|trade| {
-                    // Validate trade sequence
-                    if !state.validate_trade_sequence(&trade.coin, trade.tid) {
-                        warn!(
-                            "Skipping duplicate or out-of-order trade: {} tid={} ",
-                            trade.coin, trade.tid
-                        );
-                        crate::monitoring::DUPLICATE_TRADES.increment(1);
-                        return false;
-                    }
-
-                    // Validate timestamp
-                    if chrono::DateTime::from_timestamp_millis(trade.time).is_none() {
-                        warn!("Invalid timestamp for trade {}: {}", trade.tid, trade.time);
-                        state.record_invalid_timestamp();
-                        crate::monitoring::INVALID_TIMESTAMPS.increment(1);
-                        return false;
-                    }
-
-                    state.record_trade();
-                    true
-                })
-                .collect()
-        }; // Lock released here
-
-        // Process valid trades without holding lock
-        let trade_count = valid_trades.len();
-        if trade_count > 0 {
-            debug!("Processing {} valid trades", trade_count);
+            trades.retain(|trade| {
+                if chrono::DateTime::from_timestamp_millis(trade.time).is_none() {
+                    warn!("Invalid timestamp for trade {}: {}", trade.tid, trade.time);
+                    state.record_invalid_timestamp();
+                    crate::monitoring::INVALID_TIMESTAMPS.increment(1);
+                    return false;
+                }
+                if !state.validate_trade_sequence(&trade.coin, trade.tid) {
+                    crate::monitoring::DUPLICATE_TRADES.increment(1);
+                    return false;
+                }
+                true
+            });
+            state
+                .trade_count
+                .fetch_add(trades.len() as u64, Ordering::Relaxed);
         }
-
-        for trade in valid_trades {
-            let trade_arc = Arc::new(trade);
-            let _ = self
-                .send_event(ClientEvent::TradeReceived(Arc::clone(&trade_arc)))
-                .await;
-            self.process_trade_metrics(&trade_arc).await?;
-        }
-        Ok(())
-    }
-
-    async fn handle_book_data(&mut self, book: Book) -> Result<()> {
-        trace!(
-            "Order book update for {} with {} bids and {} asks",
-            book.coin,
-            book.levels.0.len(),
-            book.levels.1.len()
-        );
-        Ok(())
-    }
-
-    async fn handle_bbo_data(&mut self, bbo: Bbo) -> Result<()> {
-        trace!("BBO update for {}", bbo.coin);
-        Ok(())
-    }
-
-    async fn handle_all_mids_data(&mut self, all_mids: AllMids) -> Result<()> {
-        trace!("All mids update for {} symbols", all_mids.mids.len());
-        Ok(())
-    }
-
-    async fn handle_candle_data(&mut self, candles: Vec<Candle>) -> Result<()> {
-        for candle in candles {
+        crate::monitoring::TRADE_COUNTER.increment(trades.len() as u64);
+        debug!("Processing {} valid trades", trades.len());
+        for trade in trades {
             trace!(
-                "Candle data for {} - O: {}, H: {}, L: {}, C: {}",
-                candle.s, candle.o, candle.h, candle.l, candle.c
+                trade_id = trade.tid,
+                coin = %trade.coin,
+                side = %trade.side,
+                price = %trade.px,
+                size = %trade.sz,
+                hash = %trade.hash,
+                "Processing trade metrics"
             );
+            let _ = self
+                .send_event(ClientEvent::TradeReceived(Arc::new(trade)))
+                .await;
         }
         Ok(())
     }
 
-    async fn handle_user_event(&mut self, user_event: UserEvent) -> Result<()> {
+    fn handle_user_event(&self, user_event: UserEvent) {
         match user_event {
             UserEvent::Fills { fills } => {
                 info!("Received {} user fills", fills.len());
@@ -644,30 +555,6 @@ impl HyperliquidWebSocketClient {
                 info!("Non-user cancellation events: {}", non_user_cancel.len());
             }
         }
-        Ok(())
-    }
-
-    async fn handle_notification(&mut self, notification: Notification) -> Result<()> {
-        info!("System notification: {}", notification.notification);
-        Ok(())
-    }
-
-    async fn process_trade_metrics(&self, trade: &Trade) -> Result<()> {
-        crate::monitoring::TRADE_COUNTER.increment(1);
-
-        // Only trace if enabled to avoid overhead
-        if tracing::level_enabled!(tracing::Level::TRACE) {
-            trace!(
-                trade_id = trade.tid,
-                coin = %trade.coin,
-                side = %trade.side,
-                price = %trade.px,
-                size = %trade.sz,
-                hash = %trade.hash,
-                "Processing trade metrics"
-            );
-        }
-        Ok(())
     }
 }
 
@@ -693,6 +580,7 @@ mod tests {
         config::Config,
         error::HyperliquidError,
         events::{ClientEvent, EventReceiver, create_event_channel},
+        types::WebSocketMessage,
     };
 
     fn test_client() -> (HyperliquidWebSocketClient, EventReceiver) {
@@ -868,6 +756,76 @@ mod tests {
             }
         }
         assert_eq!(trade_ids, [123]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_and_wrapped_batches_share_validation() -> Result<()> {
+        for wrapped in [false, true] {
+            let (mut client, mut receiver) = test_client();
+            let WebSocketMessage::TradeData(mut batch) =
+                serde_json::from_str(&trade_message(&[42, 42, 43]))?
+            else {
+                panic!("expected a trade batch");
+            };
+            let mut invalid = batch.data[0].clone();
+            invalid.time = i64::MAX;
+            batch.data.insert(0, invalid);
+            let message = if wrapped {
+                WebSocketMessage::TradeData(batch)
+            } else {
+                WebSocketMessage::DirectTrades(batch.data)
+            };
+            client.handle_websocket_message(message).await?;
+
+            let mut ids = Vec::new();
+            while let Ok(event) = receiver.try_recv() {
+                if let ClientEvent::TradeReceived(trade) = event {
+                    ids.push(trade.tid);
+                }
+            }
+            assert_eq!(ids, [42, 43]);
+            let state = client.state.lock().await;
+            assert_eq!(state.trade_count.load(Ordering::Relaxed), 2);
+            assert_eq!(state.duplicate_trades.load(Ordering::Relaxed), 1);
+            assert_eq!(state.invalid_timestamps.load(Ordering::Relaxed), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn full_channel_waits_for_trades_and_drops_status_events() -> Result<()> {
+        let (mut client, _) = test_client();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        client.event_sender = sender;
+        client.send_event(ClientEvent::Starting).await?;
+        client.send_event(ClientEvent::Stopping).await?;
+        assert_eq!(receiver.len(), 1);
+
+        let send = client.send_event(ClientEvent::TradeReceived(Arc::new(
+            crate::types::Trade::default(),
+        )));
+        let receive = async {
+            assert!(matches!(receiver.recv().await, Some(ClientEvent::Starting)));
+            assert!(matches!(
+                receiver.recv().await,
+                Some(ClientEvent::TradeReceived(_))
+            ));
+        };
+        let (result, ()) = timeout(Duration::from_secs(5), async {
+            tokio::join!(send, receive)
+        })
+        .await?;
+        result?;
+        drop(receiver);
+        let error = client
+            .send_event(ClientEvent::Starting)
+            .await
+            .expect_err("closed channel");
+        assert!(matches!(
+            error.downcast_ref::<HyperliquidError>(),
+            Some(HyperliquidError::EventSendError(_))
+        ));
         Ok(())
     }
 }

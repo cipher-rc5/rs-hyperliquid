@@ -22,6 +22,7 @@ This project keeps runtime dependencies focused on low-latency streaming, struct
 - Keep `Cargo.lock` versioned for reproducible CI and release builds.
 - Remove dependencies not used by source or tests.
 - Prefer additive features only when they have a benchmarked or operational need.
+- Keep Tokio features explicit, use one TLS provider (`ring`), and enable only the Prometheus HTTP-listener feature used by `--metrics`.
 
 ## WebSocket handshake dependencies
 

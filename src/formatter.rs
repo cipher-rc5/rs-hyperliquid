@@ -1,6 +1,9 @@
-/// file: src/formatter.rs
-/// description: Trade data formatting and output display utilities for various formats
-/// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket
+/// Trade data formatting and output display utilities.
+use std::io::{self, Write};
+
+use chrono::{DateTime, Local};
+use serde::{Serialize, Serializer};
+
 use crate::types::Trade;
 
 // ANSI color codes
@@ -40,14 +43,37 @@ pub enum OutputFormat {
 }
 
 impl From<&str> for OutputFormat {
-    fn from(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "csv" => OutputFormat::Csv,
-            "json" => OutputFormat::Json,
-            "minimal" => OutputFormat::Minimal,
-            _ => OutputFormat::Table,
+    fn from(value: &str) -> Self {
+        match value {
+            _ if value.eq_ignore_ascii_case("csv") => Self::Csv,
+            _ if value.eq_ignore_ascii_case("json") => Self::Json,
+            _ if value.eq_ignore_ascii_case("minimal") => Self::Minimal,
+            _ => Self::Table,
         }
     }
+}
+
+#[derive(Serialize)]
+struct JsonTrade<'a> {
+    #[serde(rename = "#")]
+    count: u64,
+    coin: &'a str,
+    hash: &'a str,
+    #[serde(serialize_with = "serialize_local_time")]
+    local_time: DateTime<Local>,
+    price: f64,
+    side: &'static str,
+    size: f64,
+    trade_id: i64,
+    unix_timestamp: i64,
+    value: f64,
+}
+
+fn serialize_local_time<S: Serializer>(
+    time: &DateTime<Local>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(&time.format("%Y-%m-%d %H:%M:%S"))
 }
 
 pub struct TradeFormatter {
@@ -58,6 +84,7 @@ pub struct TradeFormatter {
     price_only: bool,
     csv_export: bool,
     trade_count: u64,
+    json_buffer: Vec<u8>,
 }
 
 impl TradeFormatter {
@@ -77,6 +104,7 @@ impl TradeFormatter {
             price_only,
             csv_export,
             trade_count: 0,
+            json_buffer: Vec::new(),
         }
     }
 
@@ -84,35 +112,44 @@ impl TradeFormatter {
         if self.quiet {
             return;
         }
-
         match self.format {
             OutputFormat::Table => self.print_table_header(),
-            OutputFormat::Csv => self.print_csv_header(),
-            OutputFormat::Json => {}    // JSON doesn't need headers
-            OutputFormat::Minimal => {} // Minimal doesn't need headers
+            OutputFormat::Csv => println!("#,side,price,size,value,local_time,unix_timestamp"),
+            OutputFormat::Json | OutputFormat::Minimal => {}
         }
     }
 
     pub fn print_trade(&mut self, trade: &Trade) {
         self.trade_count += 1;
-
         if self.price_only {
-            self.print_price_only(trade);
+            println!(
+                "{}{:.2}{}",
+                self.side_color(trade),
+                trade.px,
+                self.color(Colors::RESET)
+            );
             return;
         }
-
         match self.format {
             OutputFormat::Table => self.print_table_row(trade),
-            OutputFormat::Csv => self.print_csv_row(trade),
-            OutputFormat::Json => self.print_json_row(trade),
+            OutputFormat::Csv => self
+                .write_csv_row(&mut io::stdout().lock(), trade)
+                .expect("failed to print CSV trade"),
+            OutputFormat::Json => {
+                self.json_buffer.clear();
+                Self::write_json_row(&mut self.json_buffer, trade, self.trade_count)
+                    .expect("failed to encode JSON trade");
+                io::stdout()
+                    .lock()
+                    .write_all(&self.json_buffer)
+                    .expect("failed to print JSON trade");
+            }
             OutputFormat::Minimal => self.print_minimal_row(trade),
         }
-
-        // Export to CSV on stderr if enabled
         if self.csv_export {
-            self.export_csv_to_stderr(trade);
+            self.write_csv_row(&mut io::stderr().lock(), trade)
+                .expect("failed to export CSV trade");
         }
-
         if self.verbose {
             self.print_verbose_trade_details(trade);
         }
@@ -122,247 +159,105 @@ impl TradeFormatter {
         self.trade_count
     }
 
-    fn print_table_header(&self) {
-        if !self.quiet {
-            let header = if self.colored {
-                format!(
-                    "{}{}┌─────────┬──────┬─────────────┬─────────────┬─────────────┬─────────────────────┐{}",
-                    Colors::BOLD,
-                    Colors::GRAY,
-                    Colors::RESET
-                )
-            } else {
-                "┌─────────┬──────┬─────────────┬─────────────┬─────────────┬─────────────────────┐"
-                    .to_string()
-            };
-            println!("{}", header);
-
-            let labels = if self.colored {
-                format!(
-                    "{}{}│{} {:<7} {}│{} {:<4} {}│{} {:<11} {}│{} {:<11} {}│{} {:<11} {}│{} {:<19} {}│{}",
-                    Colors::BOLD,
-                    Colors::GRAY,
-                    Colors::RESET,
-                    "#",
-                    Colors::GRAY,
-                    Colors::RESET,
-                    "SIDE",
-                    Colors::GRAY,
-                    Colors::RESET,
-                    "PRICE",
-                    Colors::GRAY,
-                    Colors::RESET,
-                    "SIZE",
-                    Colors::GRAY,
-                    Colors::RESET,
-                    "VALUE",
-                    Colors::GRAY,
-                    Colors::RESET,
-                    "TIME",
-                    Colors::GRAY,
-                    Colors::RESET,
-                )
-            } else {
-                format!(
-                    "│ {:<7} │ {:<4} │ {:<11} │ {:<11} │ {:<11} │ {:<19} │",
-                    "#", "SIDE", "PRICE", "SIZE", "VALUE", "TIME"
-                )
-            };
-            println!("{}", labels);
-
-            let separator = if self.colored {
-                format!(
-                    "{}{}├─────────┼──────┼─────────────┼─────────────┼─────────────┼─────────────────────┤{}",
-                    Colors::BOLD,
-                    Colors::GRAY,
-                    Colors::RESET
-                )
-            } else {
-                "├─────────┼──────┼─────────────┼─────────────┼─────────────┼─────────────────────┤"
-                    .to_string()
-            };
-            println!("{}", separator);
-        }
+    fn color(&self, color: &'static str) -> &'static str {
+        if self.colored { color } else { "" }
     }
 
-    fn print_csv_header(&self) {
-        if !self.quiet {
-            println!("#,side,price,size,value,local_time,unix_timestamp");
-        }
+    fn side_color(&self, trade: &Trade) -> &'static str {
+        self.color(if trade.is_buy() {
+            Colors::BRIGHT_GREEN
+        } else {
+            Colors::BRIGHT_RED
+        })
+    }
+
+    fn print_table_header(&self) {
+        let bold = self.color(Colors::BOLD);
+        let gray = self.color(Colors::GRAY);
+        let reset = self.color(Colors::RESET);
+        println!(
+            "{bold}{gray}┌─────────┬──────┬─────────────┬─────────────┬─────────────┬─────────────────────┐{reset}"
+        );
+        println!(
+            "{bold}{gray}│{reset} {:<7} {gray}│{reset} {:<4} {gray}│{reset} {:<11} {gray}│{reset} {:<11} {gray}│{reset} {:<11} {gray}│{reset} {:<19} {gray}│{reset}",
+            "#", "SIDE", "PRICE", "SIZE", "VALUE", "TIME"
+        );
+        println!(
+            "{bold}{gray}├─────────┼──────┼─────────────┼─────────────┼─────────────┼─────────────────────┤{reset}"
+        );
     }
 
     fn print_table_row(&self, trade: &Trade) {
-        let side_color = if self.colored {
-            if trade.is_buy() {
-                Colors::BRIGHT_GREEN
-            } else {
-                Colors::BRIGHT_RED
-            }
-        } else {
-            ""
-        };
-
-        let reset = if self.colored { Colors::RESET } else { "" };
-        let gray = if self.colored { Colors::GRAY } else { "" };
-
-        let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
-        let local_time = trade.datetime_local();
-
-        let price = trade.px;
-        let size = trade.sz;
-        let value = price * size;
-
+        let side_color = self.side_color(trade);
+        let reset = self.color(Colors::RESET);
+        let gray = self.color(Colors::GRAY);
         println!(
-            "{}│{} {:<7} {}│{} {}{:<4}{} {}│{} {:<11.2} {}│{} {:<11.6} {}│{} {:<11.2} {}│{} {:<19} {}│{}",
-            gray,
-            reset,
+            "{gray}│{reset} {:<7} {gray}│{reset} {side_color}{:<4}{reset} {gray}│{reset} {:<11.2} {gray}│{reset} {:<11.6} {gray}│{reset} {:<11.2} {gray}│{reset} {:<19} {gray}│{reset}",
             self.trade_count,
-            gray,
-            reset,
-            side_color,
-            side_text,
-            reset,
-            gray,
-            reset,
-            price,
-            gray,
-            reset,
-            size,
-            gray,
-            reset,
-            value,
-            gray,
-            reset,
-            local_time.format("%H:%M:%S"),
-            gray,
-            reset
+            trade.side_formatted(),
+            trade.px,
+            trade.sz,
+            trade.value(),
+            trade.datetime_local().format("%H:%M:%S")
         );
     }
 
-    fn print_csv_row(&self, trade: &Trade) {
-        let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
-        let local_time = trade.datetime_local();
-
-        let price = trade.px;
-        let size = trade.sz;
-        let value = price * size;
-
-        println!(
+    fn write_csv_row(&self, writer: &mut impl Write, trade: &Trade) -> io::Result<()> {
+        writeln!(
+            writer,
             "{},{},{:.2},{:.6},{:.2},{},{}",
             self.trade_count,
-            side_text,
-            price,
-            size,
-            value,
-            local_time.format("%Y-%m-%d %H:%M:%S"),
+            trade.side_formatted(),
+            trade.px,
+            trade.sz,
+            trade.value(),
+            trade.datetime_local().format("%Y-%m-%d %H:%M:%S"),
             trade.time
-        );
+        )
     }
 
-    fn print_json_row(&self, trade: &Trade) {
-        let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
-        let local_time = trade.datetime_local();
-
-        let price = trade.px;
-        let size = trade.sz;
-        let value = price * size;
-
-        let json_obj = serde_json::json!({
-            "#": self.trade_count,
-            "coin": trade.coin,
-            "side": side_text,
-            "price": price,
-            "size": size,
-            "value": value,
-            "local_time": local_time.format("%Y-%m-%d %H:%M:%S").to_string(),
-            "unix_timestamp": trade.time,
-            "trade_id": trade.tid,
-            "hash": trade.hash
-        });
-
-        println!("{}", serde_json::to_string(&json_obj).unwrap_or_default());
+    fn write_json_row(writer: &mut impl Write, trade: &Trade, count: u64) -> io::Result<()> {
+        serde_json::to_writer(
+            &mut *writer,
+            &JsonTrade {
+                count,
+                coin: &trade.coin,
+                hash: &trade.hash,
+                local_time: trade.datetime_local(),
+                price: trade.px,
+                side: trade.side_formatted(),
+                size: trade.sz,
+                trade_id: trade.tid,
+                unix_timestamp: trade.time,
+                value: trade.value(),
+            },
+        )?;
+        writeln!(writer)
     }
 
     fn print_minimal_row(&self, trade: &Trade) {
         let side_symbol = if trade.is_buy() { "↗" } else { "↘" };
-        let side_color = if self.colored {
-            if trade.is_buy() {
-                Colors::BRIGHT_GREEN
-            } else {
-                Colors::BRIGHT_RED
-            }
-        } else {
-            ""
-        };
-        let reset = if self.colored { Colors::RESET } else { "" };
-
-        let price = trade.px;
-        let size = trade.sz;
-        let local_time = trade.datetime_local();
-
         println!(
             "{} {}{}{} {:<8.2} {:<8.6} {}",
-            local_time.format("%H:%M:%S"),
-            side_color,
+            trade.datetime_local().format("%H:%M:%S"),
+            self.side_color(trade),
             side_symbol,
-            reset,
-            price,
-            size,
+            self.color(Colors::RESET),
+            trade.px,
+            trade.sz,
             trade.coin
         );
     }
 
-    fn print_price_only(&self, trade: &Trade) {
-        let price = trade.px;
-        let side_color = if self.colored {
-            if trade.is_buy() {
-                Colors::BRIGHT_GREEN
-            } else {
-                Colors::BRIGHT_RED
-            }
-        } else {
-            ""
-        };
-        let reset = if self.colored { Colors::RESET } else { "" };
-
-        println!("{}{:.2}{}", side_color, price, reset);
-    }
-
-    fn export_csv_to_stderr(&self, trade: &Trade) {
-        let side_text = if trade.is_buy() { "BUY" } else { "SELL" };
-        let local_time = trade.datetime_local();
-
-        let price = trade.px;
-        let size = trade.sz;
-        let value = price * size;
-
-        eprintln!(
-            "{},{},{:.2},{:.6},{:.2},{},{}",
-            self.trade_count,
-            side_text,
-            price,
-            size,
-            value,
-            local_time.format("%Y-%m-%d %H:%M:%S"),
-            trade.time
-        );
-    }
-
     fn print_verbose_trade_details(&self, trade: &Trade) {
-        match self.format {
-            OutputFormat::Table | OutputFormat::Minimal => {
-                let (buyer, seller) = trade.buyer_seller();
-                match (buyer, seller) {
-                    (Some(buyer), Some(seller)) => {
-                        println!("  users: buyer={} seller={}", buyer, seller);
-                    }
-                    (Some(buyer), None) => {
-                        println!("  users: buyer={}", buyer);
-                    }
-                    _ => {}
+        if matches!(self.format, OutputFormat::Table | OutputFormat::Minimal) {
+            match trade.buyer_seller() {
+                (Some(buyer), Some(seller)) => {
+                    println!("  users: buyer={} seller={}", buyer, seller)
                 }
+                (Some(buyer), None) => println!("  users: buyer={}", buyer),
+                _ => {}
             }
-            OutputFormat::Csv | OutputFormat::Json => {}
         }
     }
 
@@ -370,60 +265,91 @@ impl TradeFormatter {
         if self.quiet && status != "ERROR" {
             return;
         }
-
-        let symbol = if self.colored {
-            match status {
-                "CONNECTING" => (Colors::BRIGHT_YELLOW, "*"),
-                "CONNECTED" => (Colors::BRIGHT_GREEN, "+"),
-                "LISTENING" => (Colors::BRIGHT_BLUE, "~"),
-                "ERROR" => (Colors::BRIGHT_RED, "!"),
-                _ => (Colors::WHITE, "-"),
-            }
-        } else {
-            (
-                "",
-                match status {
-                    "CONNECTING" => "*",
-                    "CONNECTED" => "+",
-                    "LISTENING" => "~",
-                    "ERROR" => "!",
-                    _ => "-",
-                },
-            )
+        let symbol = match status {
+            "CONNECTING" => "*",
+            "CONNECTED" => "+",
+            "LISTENING" => "~",
+            "ERROR" => "!",
+            _ => "-",
         };
-
-        let _reset = if self.colored { Colors::RESET } else { "" };
-
-        println!("[{}] {} {}", status, symbol.1, message);
+        println!("[{status}] {symbol} {message}");
     }
 
     pub fn print_summary(&self, total_trades: u64, duration_secs: u64) {
         if self.quiet {
             return;
         }
-
         let rate = if duration_secs > 0 {
             total_trades as f64 / duration_secs as f64
         } else {
             0.0
         };
+        println!(
+            "\n{}{}Summary: {} trades in {}s ({:.2} trades/sec){}",
+            self.color(Colors::BOLD),
+            self.color(Colors::BRIGHT_CYAN),
+            total_trades,
+            duration_secs,
+            rate,
+            self.color(Colors::RESET)
+        );
+    }
+}
 
-        println!();
-        if self.colored {
-            println!(
-                "{}{}Summary: {} trades in {}s ({:.2} trades/sec){}",
-                Colors::BOLD,
-                Colors::BRIGHT_CYAN,
-                total_trades,
-                duration_secs,
-                rate,
-                Colors::RESET
-            );
-        } else {
-            println!(
-                "Summary: {} trades in {}s ({:.2} trades/sec)",
-                total_trades, duration_secs, rate
-            );
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_and_csv_preserve_the_output_contract() -> Result<(), Box<dyn std::error::Error>> {
+        let trade = Trade {
+            coin: "B\"TC\\\n".into(),
+            side: "buy".into(),
+            px: 100000.5,
+            sz: 0.25,
+            time: 1760000000000,
+            hash: "0x\\\"1234".into(),
+            tid: 42,
+            users: Vec::new(),
+        };
+        let mut formatter =
+            TradeFormatter::new(OutputFormat::Json, false, false, true, false, false);
+        formatter.trade_count = 7;
+        let mut output = Vec::new();
+        TradeFormatter::write_json_row(&mut output, &trade, formatter.trade_count())?;
+        let expected = serde_json::json!({
+            "#": 7, "coin": trade.coin, "hash": trade.hash,
+            "local_time": trade.datetime_local().format("%Y-%m-%d %H:%M:%S").to_string(),
+            "price": 100000.5, "side": "BUY", "size": 0.25, "trade_id": 42,
+            "unix_timestamp": 1760000000000_i64, "value": 25000.125,
+        });
+        assert_eq!(String::from_utf8(output)?, format!("{expected}\n"));
+        let mut csv = Vec::new();
+        formatter.write_csv_row(&mut csv, &trade)?;
+        assert_eq!(
+            String::from_utf8(csv)?,
+            format!(
+                "7,BUY,100000.50,0.250000,25000.12,{},1760000000000\n",
+                trade.datetime_local().format("%Y-%m-%d %H:%M:%S")
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn json_preserves_null_for_non_finite_numbers() -> Result<(), Box<dyn std::error::Error>> {
+        for price in [f64::NAN, f64::INFINITY] {
+            let trade = Trade {
+                px: price,
+                sz: 1.0,
+                ..Trade::default()
+            };
+            let mut output = Vec::new();
+            TradeFormatter::write_json_row(&mut output, &trade, 0)?;
+            let value: serde_json::Value = serde_json::from_slice(&output)?;
+            assert!(value["price"].is_null());
+            assert!(value["value"].is_null());
         }
+        Ok(())
     }
 }

@@ -2,17 +2,33 @@
 /// description: type definitions and data structures for Hyperliquid WebSocket api messages
 /// reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/ws-general
 use chrono::{DateTime, Local, Utc};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 // Helper for deserializing strings to f64
 mod string_to_float {
-    use super::*;
+    use std::fmt;
+
+    use serde::{Deserializer, de};
+
     pub fn deserialize<'de, D>(deserializer: D) -> Result<f64, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        s.parse::<f64>().map_err(serde::de::Error::custom)
+        struct FloatVisitor;
+
+        impl de::Visitor<'_> for FloatVisitor {
+            type Value = f64;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a floating-point number encoded as a string")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<f64, E> {
+                value.parse().map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_str(FloatVisitor)
     }
 }
 
@@ -291,83 +307,61 @@ impl Candle {
 }
 
 impl SubscriptionRequest {
-    pub fn new_trades_subscription(coin: &str) -> Self {
+    fn new(coin: &str, subscription_type: impl Into<String>) -> Self {
         Self {
             method: "subscribe".to_string(),
             subscription: Subscription {
-                subscription_type: "trades".to_string(),
+                subscription_type: subscription_type.into(),
                 coin: coin.to_string(),
             },
         }
+    }
+
+    pub fn new_trades_subscription(coin: &str) -> Self {
+        Self::new(coin, "trades")
     }
 
     pub fn new_l2_book_subscription(coin: &str) -> Self {
-        Self {
-            method: "subscribe".to_string(),
-            subscription: Subscription {
-                subscription_type: "l2Book".to_string(),
-                coin: coin.to_string(),
-            },
-        }
+        Self::new(coin, "l2Book")
     }
 
     pub fn new_bbo_subscription(coin: &str) -> Self {
-        Self {
-            method: "subscribe".to_string(),
-            subscription: Subscription {
-                subscription_type: "bbo".to_string(),
-                coin: coin.to_string(),
-            },
-        }
+        Self::new(coin, "bbo")
     }
 
     pub fn new_all_mids_subscription() -> Self {
-        Self {
-            method: "subscribe".to_string(),
-            subscription: Subscription {
-                subscription_type: "allMids".to_string(),
-                coin: "*".to_string(),
-            },
-        }
+        Self::new("*", "allMids")
     }
 
     pub fn new_candle_subscription(coin: &str, interval: &str) -> Self {
-        Self {
-            method: "subscribe".to_string(),
-            subscription: Subscription {
-                subscription_type: format!("candle.{}", interval),
-                coin: coin.to_string(),
-            },
-        }
+        Self::new(coin, format!("candle.{interval}"))
     }
 
     pub fn new_user_events_subscription(user: &str) -> Self {
-        Self {
-            method: "subscribe".to_string(),
-            subscription: Subscription {
-                subscription_type: "userEvents".to_string(),
-                coin: user.to_string(),
-            },
-        }
+        Self::new(user, "userEvents")
     }
 
     pub fn new_user_fills_subscription(user: &str) -> Self {
-        Self {
-            method: "subscribe".to_string(),
-            subscription: Subscription {
-                subscription_type: "userFills".to_string(),
-                coin: user.to_string(),
-            },
-        }
+        Self::new(user, "userFills")
     }
 
     pub fn new_notification_subscription() -> Self {
-        Self {
-            method: "subscribe".to_string(),
-            subscription: Subscription {
-                subscription_type: "notification".to_string(),
-                coin: "*".to_string(),
-            },
+        Self::new("*", "notification")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Level;
+
+    #[test]
+    fn numeric_strings_accept_escapes_and_reject_invalid_types() {
+        let level: Level =
+            serde_json::from_str(r#"{"px":"100\u0030.5","sz":"0.25","n":1}"#).unwrap();
+        assert_eq!((level.px, level.sz), (1000.5, 0.25));
+        for price in ["1000.5", "null", "\"not a number\""] {
+            let json = format!(r#"{{"px":{price},"sz":"0.25","n":1}}"#);
+            assert!(serde_json::from_str::<Level>(&json).is_err());
         }
     }
 }

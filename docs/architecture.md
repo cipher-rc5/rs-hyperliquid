@@ -24,8 +24,9 @@
 ## Concurrency and backpressure
 
 - Event transport uses a bounded Tokio MPSC channel with capacity `10_000`.
-- Trade events are treated as critical and use short bounded wait (`10ms`) before counting as dropped.
+- Trade events first use `try_send`; a full queue triggers a short bounded wait (`10ms`) before counting as dropped.
 - Non-critical events use `try_send` to avoid blocking hot paths.
+- Trade batches are validated in place under one state lock, with trade counters updated once per batch. Event emission happens after releasing the lock.
 - Client reconnection uses exponential backoff plus jitter.
 
 ## Reliability boundaries
@@ -34,6 +35,15 @@
 - TCP connect and frame reads are guarded by configurable timeouts.
 - Invalid or duplicate trades are filtered before event emission.
 - Serialization and transport failures are converted to typed errors in `HyperliquidError`.
+- Wrapped and direct trade batches share timestamp and duplicate validation; invalid timestamps do not advance duplicate tracking.
+
+## Output and dependency footprint
+
+- JSON output serializes borrowed trade fields into a reusable buffer, preserving field order and escaping without building an intermediate JSON object.
+- CSV output and stderr export share one formatter; table output shares color handling across modes.
+- TLS uses the explicitly configured `ring` provider. Prometheus enables its HTTP listener; unused push-client features and the second TLS provider are disabled.
+- Tokio enables only the runtime, network, I/O, signal, synchronization, and timer features used by the application.
+- See `docs/performance.md` for the replay benchmark and measured release footprint.
 
 ## Module inventory
 
