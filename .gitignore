@@ -33,3 +33,7 @@ Thumbs.db
 # Documentation and site generators
 book/
 .mdbook/
+
+# Python bytecode
+__pycache__/
+*.pyc
